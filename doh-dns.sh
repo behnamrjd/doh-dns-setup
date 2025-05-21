@@ -14,11 +14,10 @@ SERVICE_DOH="doh-server"
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 MAGENTA='\033[0;35m'
 CYAN='\033[0;36m'
 
-# Functions for UI and status
 print_error() {
   echo -e "${RED}ERROR: $1${NC}"
 }
@@ -51,7 +50,6 @@ open_required_ports() {
   print_info "Opening required ports (22, 53, 80, 443, 8053)..."
   local ports=("22/tcp" "53/tcp" "53/udp" "80/tcp" "443/tcp" "8053/tcp")
   if command -v ufw &> /dev/null; then
-    # Ensure ufw is enabled
     if ! ufw status | grep -q "active"; then
       print_info "ufw is not active. Enabling ufw..."
       ufw enable || print_error "Failed to enable ufw. Check manually."
@@ -77,7 +75,6 @@ open_required_ports() {
       iptables -A INPUT -p "$proto" --dport "$port_num" -j ACCEPT || print_error "Failed to open port $port with iptables. Open it manually."
       print_info "Port $port opened with iptables."
     done
-    # Save iptables rules if possible
     if command -v iptables-save &> /dev/null; then
       iptables-save > /etc/iptables/rules.v4 2>/dev/null || print_info "Could not save iptables rules. They may reset on reboot."
     fi
@@ -142,7 +139,6 @@ remove_site() {
   fi
 }
 
-# Functions for setup
 check_root() {
   if [ "$(id -u)" -ne 0 ]; then
     print_error "This script must be run as root"
@@ -153,12 +149,10 @@ check_root() {
 install_prerequisites() {
   print_info "Installing prerequisite tools..."
   apt update || { print_error "Failed to update package lists. Check your internet connection."; exit 1; }
-  # Install basic tools that might be missing on a fresh server
   apt install -y curl wget dnsutils iproute2 net-tools || {
     print_error "Failed to install prerequisite tools. Check your package manager or internet connection."
     exit 1
   }
-  # Install ufw if not present
   if ! command -v ufw &> /dev/null; then
     apt install -y ufw || {
       print_error "Failed to install ufw. Install it manually or use another firewall tool."
@@ -258,8 +252,6 @@ restart_bind() {
 setup_nginx_ssl() {
   DOMAIN="$1"
   EMAIL="$2"
-  
-  # Check if domain resolves to server IP
   print_info "Checking if domain $DOMAIN resolves to this server's IP..."
   SERVER_IP=$(curl -s ifconfig.me || wget -qO- ipinfo.io/ip)
   if [ -z "$SERVER_IP" ]; then
@@ -276,8 +268,6 @@ setup_nginx_ssl() {
     exit 1
   fi
   print_info "Domain resolves correctly to server IP ($SERVER_IP)."
-
-  # Check if ports 80 and 443 are open
   print_info "Checking if ports 80 and 443 are open..."
   if ! ss -tuln | grep -q ":80 "; then
     print_info "Port 80 is not open. Attempting to open it with ufw..."
@@ -287,8 +277,6 @@ setup_nginx_ssl() {
     print_info "Port 443 is not open. Attempting to open it with ufw..."
     sudo ufw allow 443/tcp || print_error "Failed to open port 443. Open it manually."
   fi
-
-  # Nginx config for DoH (create config without assuming cert exists)
   NGINX_CONF="/etc/nginx/sites-available/doh_dns"
   if [ -f "$NGINX_CONF" ]; then
     print_info "Nginx config already exists. Skipping creation."
@@ -311,12 +299,9 @@ EOF
     ln -sf "$NGINX_CONF" /etc/nginx/sites-enabled/doh_dns || print_error "Failed to create symlink for Nginx config."
     print_info "Nginx config created."
   fi
-
-  # Check if certificate already exists
   if [ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
     print_info "SSL certificate for $DOMAIN already exists. Skipping Certbot."
   else
-    # Obtain SSL cert with certbot (try nginx plugin first, fallback to standalone)
     print_info "Obtaining SSL certificate with Certbot (nginx plugin)..."
     if ! certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL"; then
       print_info "Nginx plugin failed. Falling back to standalone mode for Certbot."
@@ -328,14 +313,10 @@ EOF
     fi
     print_info "SSL certificate obtained successfully."
   fi
-
-  # Check if certificate files exist before reloading Nginx
   if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
     print_error "Certificate file not found at /etc/letsencrypt/live/$DOMAIN/fullchain.pem. Check Certbot output or issue certificate manually."
     exit 1
   fi
-
-  # Reload Nginx to apply changes
   if systemctl is-active --quiet nginx; then
     systemctl reload nginx || { print_error "Failed to reload Nginx. Check logs with 'journalctl -u nginx'."; exit 1; }
   else
@@ -392,7 +373,6 @@ check_firewall_ports() {
   if [ ${#missing_ports[@]} -gt 0 ]; then
     print_error "Ports ${missing_ports[*]} are not listening."
     open_required_ports
-    # Recheck after attempting to open ports
     for port in "${missing_ports[@]}"; do
       if ! ss -tuln | grep -q ":$port "; then
         print_error "Port $port is still not listening. Open it manually or check firewall settings."
@@ -410,7 +390,7 @@ test_dns_forwarding() {
     return
   fi
   read_sites
-  test_domain="${sites[0]}"  # Fixed index to select first domain
+  test_domain="${sites[0]}"
   if [ -z "$test_domain" ]; then
     print_error "No domains available for testing. Skipping DNS test."
     return
@@ -425,7 +405,7 @@ test_dns_forwarding() {
 
 install_service() {
   check_root
-  detect_bind_service  # Detect BIND service name
+  detect_bind_service
   read -rp "Enter your domain (e.g. dns.example.com): " DOMAIN
   while [ -z "$DOMAIN" ]; do
     print_error "Domain cannot be empty. Please enter a domain."
@@ -437,7 +417,6 @@ install_service() {
     read -rp "Enter your email for Let's Encrypt SSL cert: " EMAIL
   done
 
-  # Save default sites if file doesn't exist
   if [ ! -f "$SITES_FILE" ]; then
     mkdir -p /etc/bind/zones
     for s in "${DEFAULT_SITES[@]}"; do
@@ -445,9 +424,9 @@ install_service() {
     done
   fi
 
-  install_prerequisites  # Install basic tools for a fresh server
+  install_prerequisites
   install_dependencies
-  open_required_ports  # Open all required ports
+  open_required_ports
   setup_bind_forwarders
   setup_bind_zones
   update_named_conf
@@ -467,7 +446,7 @@ install_service() {
 
 uninstall_service() {
   check_root
-  detect_bind_service  # Detect BIND service name
+  detect_bind_service
   print_info "Uninstalling services..."
   systemctl stop "$SERVICE_BIND" "$SERVICE_DOH" || true
   systemctl disable "$SERVICE_BIND" "$SERVICE_DOH" || true
@@ -479,12 +458,11 @@ uninstall_service() {
   print_info "Services uninstalled. Some configuration files may remain; remove them manually if needed."
 }
 
-# Main UI loop
 check_if_installed() {
   if [ -f "$SITES_FILE" ] || ( [ -n "$SERVICE_BIND" ] && systemctl is-active --quiet "$SERVICE_BIND" ); then
-    return 0 # Installed
+    return 0
   else
-    return 1 # Not installed
+    return 1
   fi
 }
 
@@ -496,4 +474,29 @@ main_menu() {
     echo -e "*     SMART DNS PROXY       *"
     echo -e "*****************************${NC}"
     echo -e "${YELLOW} 1)${NC} Install"
-    echo -
+    echo -e "${YELLOW} 2)${NC} Uninstall"
+    echo -e "${YELLOW} 3)${NC} Show Websites"
+    echo -e "${YELLOW} 4)${NC} Add Sites"
+    echo -e "${YELLOW} 5)${NC} Remove Sites"
+    echo -e "${YELLOW} 0)${NC} Exit"
+    echo -e "${MAGENTA}*****************************${NC}"
+    read -rp "$(echo -e "${CYAN}Enter your choice: ${NC}")" choice
+    case "$choice" in
+      1) install_service; read -n1 -r -p "Press any key to continue..." ;;
+      2) uninstall_service; read -n1 -r -p "Press any key to continue..." ;;
+      3) show_sites; read -n1 -r -p "Press any key to continue..." ;;
+      4) add_site; read -n1 -r -p "Press any key to continue..." ;;
+      5) remove_site; read -n1 -r -p "Press any key to continue..." ;;
+      0) echo "Bye!"; exit 0 ;;
+      *) echo -e "${RED}Invalid choice!${NC}"; sleep 1 ;;
+    esac
+  done
+}
+
+if check_if_installed; then
+  detect_bind_service
+  main_menu
+else
+  install_service
+  main_menu
+fi

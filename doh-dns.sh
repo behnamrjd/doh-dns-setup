@@ -347,20 +347,34 @@ EOF
 }
 
 install_doh_server() {
-  print_info "Installing DNS-over-HTTPS server (DNSCrypt/doh-server)..."
+  print_info "Installing DNS-over-HTTPS server (m13253/dns-over-https)..."
   if command -v doh-server &> /dev/null; then
     print_info "doh-server already installed."
     return
   fi
-  if ! wget https://github.com/DNSCrypt/doh-server/releases/download/0.9.11/doh-server-0.9.11-linux-x86_64.tar.gz -O /tmp/doh-server.tar.gz; then
-    print_error "Failed to download doh-server. Check your internet connection or try a different source."
-    print_error "You can download manually from https://github.com/DNSCrypt/doh-server/releases and install with:"
-    print_error "sudo tar -xzf /tmp/doh-server.tar.gz -C /usr/local/bin/ --strip-components=1 && sudo chmod +x /usr/local/bin/doh-server"
-    exit 1
+
+  # Install Go if not present
+  if ! command -v go &> /dev/null; then
+    print_info "Installing Go..."
+    sudo apt update
+    sudo apt install -y golang
   fi
-  tar -xzf /tmp/doh-server.tar.gz -C /usr/local/bin/ --strip-components=1 || { print_error "Failed to extract doh-server."; exit 1; }
-  chmod +x /usr/local/bin/doh-server
-  print_info "doh-server installed successfully."
+
+  # Clone and build the project
+  TMPDIR=$(mktemp -d)
+  git clone --depth=1 https://github.com/m13253/dns-over-https.git "$TMPDIR/dns-over-https"
+  cd "$TMPDIR/dns-over-https"
+  make doh-server/doh-server
+
+  # Move binary to /usr/local/bin
+  sudo cp doh-server/doh-server /usr/local/bin/doh-server
+  sudo chmod +x /usr/local/bin/doh-server
+
+  # Clean up
+  cd /
+  rm -rf "$TMPDIR"
+
+  print_info "doh-server installed successfully from m13253/dns-over-https."
 }
 
 setup_doh_service() {

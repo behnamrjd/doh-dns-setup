@@ -252,6 +252,7 @@ restart_bind() {
 setup_nginx_ssl() {
   DOMAIN="$1"
   EMAIL="$2"
+
   print_info "Checking if domain $DOMAIN resolves to this server's IP..."
   SERVER_IP=$(curl -s ifconfig.me || wget -qO- ipinfo.io/ip)
   if [ -z "$SERVER_IP" ]; then
@@ -268,6 +269,7 @@ setup_nginx_ssl() {
     exit 1
   fi
   print_info "Domain resolves correctly to server IP ($SERVER_IP)."
+
   print_info "Checking if ports 80 and 443 are open..."
   if ! ss -tuln | grep -q ":80 "; then
     print_info "Port 80 is not open. Attempting to open it with ufw..."
@@ -277,6 +279,7 @@ setup_nginx_ssl() {
     print_info "Port 443 is not open. Attempting to open it with ufw..."
     sudo ufw allow 443/tcp || print_error "Failed to open port 443. Open it manually."
   fi
+
   NGINX_CONF="/etc/nginx/sites-available/doh_dns"
   if [ -f "$NGINX_CONF" ]; then
     print_info "Nginx config already exists. Skipping creation."
@@ -299,24 +302,41 @@ EOF
     ln -sf "$NGINX_CONF" /etc/nginx/sites-enabled/doh_dns || print_error "Failed to create symlink for Nginx config."
     print_info "Nginx config created."
   fi
+
+  # If certificate already exists, skip issuance
   if [ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
     print_info "SSL certificate for $DOMAIN already exists. Skipping Certbot."
   else
-    print_info "Obtaining SSL certificate with Certbot (nginx plugin)..."
-    if ! certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL"; then
-      print_info "Nginx plugin failed. Falling back to standalone mode for Certbot."
-      if ! certbot certonly --standalone -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL"; then
-        print_error "Failed to get SSL certificate for $DOMAIN. Ensure the domain points to this server, ports 80 and 443 are open, and try again."
-        print_error "You can also run Certbot manually with: sudo certbot certonly --standalone -d $DOMAIN"
-        exit 1
-      fi
+    print_info "Obtaining SSL certificate for $DOMAIN..."
+
+    # If port 80 is in use, temporarily stop nginx or apache2
+    if ss -tuln | grep -q ":80 "; then
+      print_info "Port 80 is in use. Stopping nginx (or other web servers) temporarily for certbot standalone challenge..."
+      systemctl stop nginx 2>/dev/null || true
+      systemctl stop apache2 2>/dev/null || true
     fi
+
+    # Try to obtain certificate with certbot standalone
+    if ! certbot certonly --standalone --preferred-challenges http -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL"; then
+      print_error "Failed to get SSL certificate for $DOMAIN. Ensure the domain points to this server, ports 80 and 443 are open, and try again."
+      print_error "You can also run Certbot manually with: sudo certbot certonly --standalone -d $DOMAIN"
+      # After failure, restart nginx
+      systemctl start nginx 2>/dev/null || true
+      exit 1
+    fi
+
     print_info "SSL certificate obtained successfully."
+    # After success, restart nginx
+    systemctl start nginx 2>/dev/null || true
   fi
+
+  # Ensure certificate files exist
   if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
     print_error "Certificate file not found at /etc/letsencrypt/live/$DOMAIN/fullchain.pem. Check Certbot output or issue certificate manually."
     exit 1
   fi
+
+  # Reload or start nginx
   if systemctl is-active --quiet nginx; then
     systemctl reload nginx || { print_error "Failed to reload Nginx. Check logs with 'journalctl -u nginx'."; exit 1; }
   else

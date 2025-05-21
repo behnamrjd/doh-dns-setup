@@ -476,4 +476,5 @@ uninstall_service() {
   }
   rm -rf /etc/bind/zones /etc/nginx/sites-available/doh_dns /etc/nginx/sites-enabled/doh_dns /etc/systemd/system/doh-server.service /usr/local/bin/doh-server
   systemctl daemon-reload
-  print_info
+  print_info "Services uninstalled. Some configuration files may remain; remove them manually if needed."
+}

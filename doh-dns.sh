@@ -162,6 +162,18 @@ install_prerequisites() {
   print_info "Prerequisite tools installed."
 }
 
+# Check if make is installed, if not install it
+check_make() {
+  if ! command -v make &> /dev/null; then
+    print_info "make not found. Installing make..."
+    apt update || { print_error "Failed to update package lists. Check your internet connection."; exit 1; }
+    apt install -y make || { print_error "Failed to install make. Check your package manager or internet connection."; exit 1; }
+    print_info "make installed successfully."
+  else
+    print_info "make is already installed."
+  fi
+}
+
 install_dependencies() {
   print_info "Updating and installing dependencies..."
   apt update || { print_error "Failed to update package lists. Check your internet connection."; exit 1; }
@@ -252,7 +264,6 @@ restart_bind() {
 setup_nginx_ssl() {
   DOMAIN="$1"
   EMAIL="$2"
-
   print_info "Checking if domain $DOMAIN resolves to this server's IP..."
   SERVER_IP=$(curl -s ifconfig.me || wget -qO- ipinfo.io/ip)
   if [ -z "$SERVER_IP" ]; then
@@ -269,7 +280,6 @@ setup_nginx_ssl() {
     exit 1
   fi
   print_info "Domain resolves correctly to server IP ($SERVER_IP)."
-
   print_info "Checking if ports 80 and 443 are open..."
   if ! ss -tuln | grep -q ":80 "; then
     print_info "Port 80 is not open. Attempting to open it with ufw..."
@@ -279,7 +289,6 @@ setup_nginx_ssl() {
     print_info "Port 443 is not open. Attempting to open it with ufw..."
     sudo ufw allow 443/tcp || print_error "Failed to open port 443. Open it manually."
   fi
-
   NGINX_CONF="/etc/nginx/sites-available/doh_dns"
   if [ -f "$NGINX_CONF" ]; then
     print_info "Nginx config already exists. Skipping creation."
@@ -302,41 +311,24 @@ EOF
     ln -sf "$NGINX_CONF" /etc/nginx/sites-enabled/doh_dns || print_error "Failed to create symlink for Nginx config."
     print_info "Nginx config created."
   fi
-
-  # If certificate already exists, skip issuance
   if [ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
     print_info "SSL certificate for $DOMAIN already exists. Skipping Certbot."
   else
-    print_info "Obtaining SSL certificate for $DOMAIN..."
-
-    # If port 80 is in use, temporarily stop nginx or apache2
-    if ss -tuln | grep -q ":80 "; then
-      print_info "Port 80 is in use. Stopping nginx (or other web servers) temporarily for certbot standalone challenge..."
-      systemctl stop nginx 2>/dev/null || true
-      systemctl stop apache2 2>/dev/null || true
+    print_info "Obtaining SSL certificate with Certbot (nginx plugin)..."
+    if ! certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL"; then
+      print_info "Nginx plugin failed. Falling back to standalone mode for Certbot."
+      if ! certbot certonly --standalone -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL"; then
+        print_error "Failed to get SSL certificate for $DOMAIN. Ensure the domain points to this server, ports 80 and 443 are open, and try again."
+        print_error "You can also run Certbot manually with: sudo certbot certonly --standalone -d $DOMAIN"
+        exit 1
+      fi
     fi
-
-    # Try to obtain certificate with certbot standalone
-    if ! certbot certonly --standalone --preferred-challenges http -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL"; then
-      print_error "Failed to get SSL certificate for $DOMAIN. Ensure the domain points to this server, ports 80 and 443 are open, and try again."
-      print_error "You can also run Certbot manually with: sudo certbot certonly --standalone -d $DOMAIN"
-      # After failure, restart nginx
-      systemctl start nginx 2>/dev/null || true
-      exit 1
-    fi
-
     print_info "SSL certificate obtained successfully."
-    # After success, restart nginx
-    systemctl start nginx 2>/dev/null || true
   fi
-
-  # Ensure certificate files exist
   if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
     print_error "Certificate file not found at /etc/letsencrypt/live/$DOMAIN/fullchain.pem. Check Certbot output or issue certificate manually."
     exit 1
   fi
-
-  # Reload or start nginx
   if systemctl is-active --quiet nginx; then
     systemctl reload nginx || { print_error "Failed to reload Nginx. Check logs with 'journalctl -u nginx'."; exit 1; }
   else
@@ -353,24 +345,24 @@ install_doh_server() {
     return
   fi
 
+  # Check and install make if necessary
+  check_make
+
   # Install Go if not present
   if ! command -v go &> /dev/null; then
     print_info "Installing Go..."
-    sudo apt update
-    sudo apt install -y golang
+    apt update
+    apt install -y golang
   fi
 
-  # Clone and build the project
   TMPDIR=$(mktemp -d)
   git clone --depth=1 https://github.com/m13253/dns-over-https.git "$TMPDIR/dns-over-https"
   cd "$TMPDIR/dns-over-https"
   make doh-server/doh-server
 
-  # Move binary to /usr/local/bin
   sudo cp doh-server/doh-server /usr/local/bin/doh-server
   sudo chmod +x /usr/local/bin/doh-server
 
-  # Clean up
   cd /
   rm -rf "$TMPDIR"
 
@@ -381,11 +373,11 @@ setup_doh_service() {
   DOMAIN="$1"
   cat > /etc/systemd/system/doh-server.service << EOF
 [Unit]
-Description=DNS over HTTPS server (DNSCrypt)
+Description=DNS over HTTPS server (m13253)
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/doh-server -addr :8053 -cert /etc/letsencrypt/live/$DOMAIN/fullchain.pem -key /etc/letsencrypt/live/$DOMAIN/privkey.pem -upstream 1.1.1.1:53
+ExecStart=/usr/local/bin/doh-server -listen :8053 -cert /etc/letsencrypt/live/$DOMAIN/fullchain.pem -key /etc/letsencrypt/live/$DOMAIN/privkey.pem -upstream https://1.1.1.1/dns-query
 Restart=always
 
 [Install]
@@ -440,6 +432,7 @@ test_dns_forwarding() {
 install_service() {
   check_root
   detect_bind_service
+  check_make
   read -rp "Enter your domain (e.g. dns.example.com): " DOMAIN
   while [ -z "$DOMAIN" ]; do
     print_error "Domain cannot be empty. Please enter a domain."

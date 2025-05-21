@@ -478,3 +478,22 @@ uninstall_service() {
   systemctl daemon-reload
   print_info "Services uninstalled. Some configuration files may remain; remove them manually if needed."
 }
+
+# Main UI loop
+check_if_installed() {
+  if [ -f "$SITES_FILE" ] || ( [ -n "$SERVICE_BIND" ] && systemctl is-active --quiet "$SERVICE_BIND" ); then
+    return 0 # Installed
+  else
+    return 1 # Not installed
+  fi
+}
+
+main_menu() {
+  while true; do
+    clear
+    echo -e "${MAGENTA}[Service Status: $(service_status)]${NC}"
+    echo -e "${MAGENTA}*****************************"
+    echo -e "*     SMART DNS PROXY       *"
+    echo -e "*****************************${NC}"
+    echo -e "${YELLOW} 1)${NC} Install"
+    echo -

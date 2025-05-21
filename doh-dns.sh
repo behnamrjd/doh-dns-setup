@@ -530,7 +530,7 @@ uninstall_service() {
 }
 
 check_if_installed() {
-  if [ -f "$SITES_FILE" ] || ( [ -n "$SERVICE_BIND" ] && systemctl is-active --quiet "$SERVICE_BIND" ); then
+  if [ -f "$SITES_FILE" ] || systemctl is-active --quiet "$SERVICE_BIND"; then
     return 0
   else
     return 1
@@ -566,8 +566,8 @@ main_menu() {
   done
 }
 
+detect_bind_service
 if check_if_installed; then
-  detect_bind_service
   main_menu
 else
   install_service

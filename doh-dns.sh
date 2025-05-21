@@ -162,7 +162,6 @@ install_prerequisites() {
   print_info "Prerequisite tools installed."
 }
 
-# Check if make is installed, if not install it
 check_make() {
   if ! command -v make &> /dev/null; then
     print_info "make not found. Installing make..."
@@ -345,10 +344,8 @@ install_doh_server() {
     return
   fi
 
-  # Check and install make if necessary
   check_make
 
-  # Install Go if not present
   if ! command -v go &> /dev/null; then
     print_info "Installing Go..."
     apt update
@@ -429,6 +426,42 @@ test_dns_forwarding() {
   fi
 }
 
+reset_everything() {
+  print_info "Full reset: Stopping and removing all configs, zones, certs, and services..."
+
+  # Stop services
+  systemctl stop nginx doh-server bind9 named 2>/dev/null || true
+  systemctl disable nginx doh-server bind9 named 2>/dev/null || true
+
+  # Remove nginx DoH config
+  rm -f /etc/nginx/sites-available/doh_dns /etc/nginx/sites-enabled/doh_dns
+
+  # Remove BIND zones and configs
+  rm -rf /etc/bind/zones
+  rm -f /etc/bind/named.conf.local /etc/bind/named.conf.options
+
+  # Remove DoH server binary and systemd service
+  rm -f /usr/local/bin/doh-server /etc/systemd/system/doh-server.service
+
+  # Remove Let's Encrypt certificates (for all domains)
+  rm -rf /etc/letsencrypt/live/* /etc/letsencrypt/archive/* /etc/letsencrypt/renewal/*.conf
+
+  # Remove certbot logs
+  rm -rf /var/log/letsencrypt
+
+  # Remove sites.list if exists
+  rm -f "$SITES_FILE"
+
+  # Reload systemd and restart networking
+  systemctl daemon-reload
+  systemctl restart networking 2>/dev/null || true
+
+  # Start nginx (empty config)
+  systemctl start nginx 2>/dev/null || true
+
+  print_info "Full reset complete. The server is now clean and ready for a new setup."
+}
+
 install_service() {
   check_root
   detect_bind_service
@@ -505,6 +538,7 @@ main_menu() {
     echo -e "${YELLOW} 3)${NC} Show Websites"
     echo -e "${YELLOW} 4)${NC} Add Sites"
     echo -e "${YELLOW} 5)${NC} Remove Sites"
+    echo -e "${YELLOW} 9)${NC} Full Reset (Danger!)"
     echo -e "${YELLOW} 0)${NC} Exit"
     echo -e "${MAGENTA}*****************************${NC}"
     read -rp "$(echo -e "${CYAN}Enter your choice: ${NC}")" choice
@@ -514,6 +548,7 @@ main_menu() {
       3) show_sites; read -n1 -r -p "Press any key to continue..." ;;
       4) add_site; read -n1 -r -p "Press any key to continue..." ;;
       5) remove_site; read -n1 -r -p "Press any key to continue..." ;;
+      9) echo -e "${RED}WARNING: This will delete all configs, zones, certs, and services!${NC}"; read -rp "Are you sure? (yes/no): " ans; if [ "$ans" == "yes" ]; then reset_everything; read -n1 -r -p "Press any key to continue..."; fi ;;
       0) echo "Bye!"; exit 0 ;;
       *) echo -e "${RED}Invalid choice!${NC}"; sleep 1 ;;
     esac

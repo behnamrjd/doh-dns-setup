@@ -1,27 +1,39 @@
 #!/bin/bash
 set -e
 
-# ====== Output colors ======
+# ====== Key File Paths ======
+SITES_FILE="/etc/bind/zones/sites.list"
+ZONES_FILE="/etc/bind/zones/blocklist.zones"
+NAMED_OPTIONS="/etc/bind/named.conf.options"
+NAMED_CONF="/etc/bind/named.conf"
+NAMED_CONF_LOCAL="/etc/bind/named.conf.local"
+ZONES_DIR="/etc/bind/zones"
+
+# ====== Output Colors ======
 if [ -t 1 ]; then
   RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'; MAGENTA='\033[0;35m'; CYAN='\033[0;36m'
 else
   RED=''; GREEN=''; YELLOW=''; NC=''; MAGENTA=''; CYAN='';
 fi
 
+# ====== Print Functions ======
 print_error() { echo -e "${RED}ERROR: $1${NC}"; }
 print_info()  { echo -e "${GREEN}INFO: $1${NC}"; }
 print_warn()  { echo -e "${YELLOW}WARNING: $1${NC}"; }
 
+# ====== Interactive Shell Check ======
 if ! [ -t 0 ]; then
   print_error "This script must be run in an interactive shell."
   exit 1
 fi
 
+# ====== Check for apt Package Manager ======
 if ! command -v apt &> /dev/null; then
   print_error "This script only supports Debian/Ubuntu systems with apt package manager."
   exit 1
 fi
 
+# ====== Disk Space Check ======
 check_disk_space() {
   for mount in / /etc /var; do
     local avail=$(df "$mount" | tail -1 | awk '{print $4}')
@@ -32,6 +44,7 @@ check_disk_space() {
   done
 }
 
+# ====== Input Validation Functions ======
 validate_domain() {
   [[ "$1" =~ ^([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}$ ]]
 }
@@ -42,7 +55,9 @@ validate_port() {
   [[ "$1" =~ ^[0-9]{2,5}$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
 }
 
+# ====== BIND Service Detection and Status ======
 detect_bind_service() {
+  # Prefer named.service if present, fallback to bind9.service
   if systemctl list-unit-files | grep -q "named.service"; then
     SERVICE_BIND="named"
   elif systemctl list-unit-files | grep -q "bind9.service"; then
@@ -77,6 +92,8 @@ check_service_running() {
   fi
   return 0
 }
+
+# ====== Internet Connectivity Check ======
 check_internet() {
   print_info "Checking internet connectivity..."
   if ! ping -c 1 1.1.1.1 >/dev/null 2>&1 && ! ping6 -c 1 2606:4700:4700::1111 >/dev/null 2>&1; then
@@ -85,6 +102,8 @@ check_internet() {
   fi
   print_info "Internet connectivity OK."
 }
+
+# ====== Firewall and Port Functions ======
 detect_firewall() {
   if command -v ufw >/dev/null 2>&1; then
     echo "ufw"
@@ -97,6 +116,7 @@ detect_firewall() {
   fi
 }
 open_ports() {
+  # Open required ports for DNS, HTTP, HTTPS, DoH
   local ports=("22" "53" "80" "443" "8053")
   local fw=$(detect_firewall)
   if [ "$fw" = "ufw" ]; then
@@ -117,6 +137,7 @@ open_ports() {
   fi
 }
 choose_dns_port() {
+  # Allow user to select alternate DNS port if 53 is busy
   local port=53
   if ss -tuln | grep -q ":53 "; then
     print_warn "Port 53 is already in use."
@@ -146,6 +167,7 @@ choose_dns_port() {
   DNS_PORT=$port
 }
 
+# ====== Backup & Full Reset Functions ======
 prompt_backup() {
   read -p "Would you like to back up important configuration files before proceeding? (y/n) " choice
   case "$choice" in
@@ -154,22 +176,28 @@ prompt_backup() {
   esac
 }
 backup_configs() {
-  sudo cp /etc/bind/named.conf.local /etc/bind/named.conf.local.bak 2>/dev/null || true
-  sudo cp /etc/bind/named.conf.options /etc/bind/named.conf.options.bak 2>/dev/null || true
+  sudo cp "$NAMED_CONF_LOCAL" "$NAMED_CONF_LOCAL.bak" 2>/dev/null || true
+  sudo cp "$NAMED_OPTIONS" "$NAMED_OPTIONS.bak" 2>/dev/null || true
 }
+
 reset_everything() {
+  # Full cleanup: stop/disable all services, remove configs, clean up ports and files
   prompt_backup
   print_info "Resetting: Only files created by this script will be removed."
   sudo systemctl stop nginx doh-server bind9 named 2>/dev/null || true
   sudo systemctl disable bind9 named 2>/dev/null || true
 
-  # Remove listen-on port lines from bind config (restores port to default and frees all custom ports)
-  sudo sed -i '/listen-on port/d' /etc/bind/named.conf.options
-  sudo sed -i '/listen-on-v6 port/d' /etc/bind/named.conf.options
+  # Remove custom listen-on port lines from BIND config
+  if [ -f "$NAMED_OPTIONS" ]; then
+    sudo sed -i '/listen-on port/d' "$NAMED_OPTIONS"
+    sudo sed -i '/listen-on-v6 port/d' "$NAMED_OPTIONS"
+  fi
 
   sudo rm -f /etc/nginx/sites-available/doh_dns_* /etc/nginx/sites-enabled/doh_dns_*
-  sudo rm -rf /etc/bind/zones
+  sudo rm -rf "$ZONES_DIR"
   sudo rm -f /usr/local/bin/doh-server /etc/systemd/system/doh-server.service
+
+  # Remove Let's Encrypt certs for all domains in sites.list
   if [ -f "$SITES_FILE" ]; then
     mapfile -t domains < "$SITES_FILE"
     for d in "${domains[@]}"; do
@@ -178,12 +206,25 @@ reset_everything() {
   fi
   sudo rm -rf /var/log/letsencrypt
   sudo rm -f "$SITES_FILE"
+
+  # Remove any broken include or zone lines from named.conf.local
+  if [ -f "$NAMED_CONF_LOCAL" ]; then
+    sudo sed -i '/blocklist\.zones/d' "$NAMED_CONF_LOCAL"
+    sudo sed -i '/zone.*{/,/};/d' "$NAMED_CONF_LOCAL"
+  fi
+
+  # Ensure empty zone file exists to avoid BIND errors
+  sudo mkdir -p "$ZONES_DIR"
+  sudo touch "$ZONES_FILE"
+
   sudo systemctl daemon-reload
   sudo systemctl restart networking 2>/dev/null || true
   sudo systemctl start nginx 2>/dev/null || true
+
   print_info "Reset complete. Main system files are not deleted and all previous DNS ports are now free."
 }
 
+# ====== Website List Management ======
 read_sites() {
   if [ -f "$SITES_FILE" ]; then
     mapfile -t sites < "$SITES_FILE"
@@ -211,6 +252,7 @@ add_site() {
   if [[ " ${sites[*]} " == *" $domain "* ]]; then
     echo -e "${YELLOW}Domain already exists.${NC}"
   else
+    sudo mkdir -p "$ZONES_DIR"
     local lock="$SITES_FILE.lock"
     TMPFILES+=("$lock")
     (
@@ -243,6 +285,7 @@ remove_site() {
   fi
 }
 
+# ====== Dependency Installation (with Verification) ======
 install_prerequisites() {
   print_info "Installing prerequisite tools..."
   apt update || { print_error "Failed to update package lists."; exit 1; }
@@ -291,6 +334,7 @@ install_dependencies() {
   print_info "All dependencies installed and verified."
 }
 
+# ====== BIND Zone Conflict Check ======
 check_zone_conflict() {
   local domain="$1"
   local found=$(grep -r "zone \"$domain\"" /etc/bind/ 2>/dev/null | grep -v blocklist.zones || true)
@@ -301,6 +345,8 @@ check_zone_conflict() {
   fi
   return 0
 }
+
+# ====== BIND Install/Uninstall ======
 install_bind() {
   read_sites
   for domain in "${sites[@]}"; do
@@ -315,6 +361,12 @@ install_bind() {
     print_error "named-checkconf failed to install."
     exit 1
   fi
+  sudo mkdir -p "$ZONES_DIR"
+  sudo touch "$ZONES_FILE"
+  if ! sudo named-checkconf "$NAMED_CONF"; then
+    print_error "BIND configuration syntax error. Please fix your configs."
+    exit 1
+  fi
   print_info "Restarting BIND service..."
   restart_bind
   check_service_running "$SERVICE_BIND" || exit 1
@@ -326,6 +378,7 @@ uninstall_bind() {
   print_info "BIND removed."
 }
 
+# ====== Nginx Conflict & Install/Uninstall ======
 nginx_domain_conflict() {
   local domain="$1"
   local port="$2"
@@ -452,6 +505,7 @@ uninstall_nginx() {
   print_info "Nginx removed."
 }
 
+# ====== DoH Server Management ======
 install_doh_server() {
   check_make
   if ! command -v git &> /dev/null; then
@@ -515,8 +569,9 @@ EOF
   check_service_running doh-server || exit 1
 }
 
+# ====== BIND Forwarders and Zone File Setup ======
 setup_bind_forwarders() {
-  NAMED_OPTIONS="/etc/bind/named.conf.options"
+  sudo mkdir -p "$ZONES_DIR"
   sudo sed -i '/listen-on port/d' "$NAMED_OPTIONS"
   sudo sed -i '/listen-on-v6 port/d' "$NAMED_OPTIONS"
   if ! grep -q "forwarders {" "$NAMED_OPTIONS"; then
@@ -538,16 +593,16 @@ EOF
   fi
 }
 setup_bind_zones() {
-  mkdir -p /etc/bind/zones
-  touch "$ZONES_FILE"
-  echo "// Zones for forwarding blocked domains" > "$ZONES_FILE"
+  sudo mkdir -p "$ZONES_DIR"
+  sudo touch "$ZONES_FILE"
+  echo "// Zones for forwarding blocked domains" | sudo tee "$ZONES_FILE" > /dev/null
   read_sites
   local lock="$ZONES_FILE.lock"
   TMPFILES+=("$lock")
   (
     flock -x 200
     for domain in "${sites[@]}"; do
-      cat >> "$ZONES_FILE" << EOF
+      cat << EOF | sudo tee -a "$ZONES_FILE" > /dev/null
 
 zone "$domain" {
   type forward;
@@ -559,14 +614,16 @@ EOF
   ) 200>"$lock"
 }
 update_zones() {
-  echo "// Zones for forwarding blocked domains" > "$ZONES_FILE"
+  sudo mkdir -p "$ZONES_DIR"
+  sudo touch "$ZONES_FILE"
+  echo "// Zones for forwarding blocked domains" | sudo tee "$ZONES_FILE" > /dev/null
   read_sites
   local lock="$ZONES_FILE.lock"
   TMPFILES+=("$lock")
   (
     flock -x 200
     for domain in "${sites[@]}"; do
-      cat >> "$ZONES_FILE" << EOF
+      cat << EOF | sudo tee -a "$ZONES_FILE" > /dev/null
 
 zone "$domain" {
   type forward;
@@ -580,13 +637,12 @@ EOF
   restart_bind
 }
 update_named_conf() {
-  NAMED_CONF="/etc/bind/named.conf.local"
-  if ! grep -q "include \"/etc/bind/zones/blocklist.zones\";" "$NAMED_CONF"; then
-    echo 'include "/etc/bind/zones/blocklist.zones";' >> "$NAMED_CONF"
+  if ! grep -q "include \"$ZONES_FILE\";" "$NAMED_CONF_LOCAL"; then
+    echo "include \"$ZONES_FILE\";" | sudo tee -a "$NAMED_CONF_LOCAL"
   fi
 }
 check_bind_config() {
-  if ! named-checkconf /etc/bind/named.conf; then
+  if ! named-checkconf "$NAMED_CONF"; then
     print_error "BIND configuration syntax error."
     exit 1
   fi
@@ -605,6 +661,8 @@ restart_bind() {
     exit 1
   fi
 }
+
+# ====== DNS Test ======
 test_dns_forwarding() {
   print_info "Testing DNS forwarding for a sample domain..."
   if ! command -v dig &> /dev/null; then
@@ -631,6 +689,7 @@ check_root() {
   fi
 }
 
+# ====== Main Install/Uninstall Logic ======
 install_service() {
   check_root
   check_disk_space
@@ -646,9 +705,9 @@ install_service() {
     if validate_email "$EMAIL"; then break; else print_error "Invalid email format."; fi
   done
   if [ ! -f "$SITES_FILE" ]; then
-    mkdir -p /etc/bind/zones
+    sudo mkdir -p "$ZONES_DIR"
     for s in "${DEFAULT_SITES[@]}"; do
-      echo "$s" >> "$SITES_FILE"
+      echo "$s" | sudo tee -a "$SITES_FILE" > /dev/null
     done
   fi
   install_prerequisites
@@ -689,6 +748,7 @@ check_if_installed() {
   fi
 }
 
+# ====== Temp File Cleanup ======
 TMPFILES=()
 cleanup() {
   for f in "${TMPFILES[@]}"; do
@@ -696,6 +756,12 @@ cleanup() {
   done
 }
 trap cleanup EXIT
+
+# ====== Defaults and Main Menu ======
+DEFAULT_SITES=("youtube.com" "instagram.com" "facebook.com" "telegram.org" "twitter.com" "t.me" "discord.com" "spotify.com")
+SERVICE_BIND=""
+SERVICE_DOH="doh-server"
+DNS_PORT=53
 
 main_menu() {
   while true; do

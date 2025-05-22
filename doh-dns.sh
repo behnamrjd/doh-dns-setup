@@ -43,6 +43,9 @@ validate_domain() {
 validate_email() {
   [[ "$1" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]
 }
+validate_port() {
+  [[ "$1" =~ ^[0-9]{2,5}$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
 
 # ====== Service Detection & Status ======
 detect_bind_service() {
@@ -92,7 +95,7 @@ check_internet() {
   print_info "Internet connectivity OK."
 }
 
-# ====== Port Checking & Firewall ======
+# ====== Port/Firewall ======
 detect_firewall() {
   if command -v ufw >/dev/null 2>&1; then
     echo "ufw"
@@ -124,18 +127,36 @@ open_ports() {
     print_info "No firewall detected. Please ensure required ports (22,53,80,443,8053) are open."
   fi
 }
-check_port_usage() {
-  local port=$1
-  if ss -tuln | grep -q ":${port} "; then
-    print_error "Port $port is already in use. Please resolve the conflict before proceeding."
-    exit 1
-  fi
-}
 
-check_all_ports() {
-  for port in 53 80 443 8053; do
-    check_port_usage "$port"
-  done
+# ====== DNS Port Selection ======
+choose_dns_port() {
+  local port=53
+  if ss -tuln | grep -q ":53 "; then
+    print_warn "Port 53 is already in use."
+    while true; do
+      read -p "Do you want to use a different port for DNS? (y/N): " ans
+      if [[ "$ans" =~ ^[Yy]$ ]]; then
+        while true; do
+          read -p "Enter alternative port number (e.g. 1053): " newport
+          if validate_port "$newport"; then
+            if ss -tuln | grep -q ":$newport "; then
+              print_error "Port $newport is also in use. Please choose another port."
+            else
+              port=$newport
+              break
+            fi
+          else
+            print_error "Invalid port number."
+          fi
+        done
+        break
+      elif [[ "$ans" =~ ^[Nn]$|^$ ]]; then
+        print_error "Port 53 is in use. Exiting."
+        exit 1
+      fi
+    done
+  fi
+  DNS_PORT=$port
 }
 
 # ====== Backup & Reset ======
@@ -172,6 +193,13 @@ reset_everything() {
 }
 
 # ====== Site Management ======
+DEFAULT_SITES=("youtube.com" "instagram.com" "facebook.com" "telegram.org" "twitter.com" "t.me" "discord.com" "spotify.com")
+SITES_FILE="/etc/bind/zones/sites.list"
+ZONES_FILE="/etc/bind/zones/blocklist.zones"
+SERVICE_BIND=""
+SERVICE_DOH="doh-server"
+DNS_PORT=53
+
 read_sites() {
   if [ -f "$SITES_FILE" ]; then
     mapfile -t sites < "$SITES_FILE"
@@ -499,7 +527,7 @@ Description=DNS over HTTPS server (m13253)
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/doh-server -listen :8053 -cert /etc/letsencrypt/live/$DOMAIN/fullchain.pem -key /etc/letsencrypt/live/$DOMAIN/privkey.pem -upstream https://1.1.1.1/dns-query
+ExecStart=/usr/local/bin/doh-server -listen :8053 -cert /etc/letsencrypt/live/$DOMAIN/fullchain.pem -key /etc/letsencrypt/live/$DOMAIN/privkey.pem -upstream 127.0.0.1:$DNS_PORT
 Restart=always
 
 [Install]
@@ -513,6 +541,9 @@ EOF
 # ====== Zone Management ======
 setup_bind_forwarders() {
   NAMED_OPTIONS="/etc/bind/named.conf.options"
+  # Remove any previous listen-on port lines to avoid duplicates
+  sed -i '/listen-on port/d' "$NAMED_OPTIONS"
+  sed -i '/listen-on-v6 port/d' "$NAMED_OPTIONS"
   if ! grep -q "forwarders {" "$NAMED_OPTIONS"; then
     cat >> "$NAMED_OPTIONS" << EOF
 options {
@@ -521,11 +552,15 @@ options {
   forward only;
   dnssec-validation auto;
   auth-nxdomain no;
-  listen-on { any; };
-  listen-on-v6 { any; };
+  listen-on port $DNS_PORT { any; };
+  listen-on-v6 port $DNS_PORT { any; };
   allow-query { any; };
 };
 EOF
+  else
+    # Add/replace listen-on port and listen-on-v6 port lines
+    sed -i "/listen-on {/a\    listen-on port $DNS_PORT { any; };" "$NAMED_OPTIONS"
+    sed -i "/listen-on-v6 {/a\    listen-on-v6 port $DNS_PORT { any; };" "$NAMED_OPTIONS"
   fi
 }
 setup_bind_zones() {
@@ -600,7 +635,7 @@ test_dns_forwarding() {
     print_error "No domains available for testing. Skipping DNS test."
     return
   fi
-  if dig @"127.0.0.1" "$test_domain" A +short | grep -q .; then
+  if dig @"127.0.0.1" -p "$DNS_PORT" "$test_domain" A +short | grep -q .; then
     print_info "DNS forwarding test passed for $test_domain."
   else
     print_error "DNS forwarding test failed for $test_domain."
@@ -621,7 +656,7 @@ install_service() {
   check_disk_space
   check_internet
   detect_bind_service
-  check_all_ports
+  choose_dns_port
   while true; do
     read -rp "Enter your domain (e.g. dns.example.com): " DOMAIN
     if validate_domain "$DOMAIN"; then break; else print_error "Invalid domain format."; fi
@@ -651,6 +686,10 @@ install_service() {
   test_dns_forwarding
   echo
   echo "Setup complete!"
+  if [ "$DNS_PORT" != "53" ]; then
+    echo -e "${YELLOW}NOTE:${NC} Your DNS server is running on port $DNS_PORT instead of 53."
+    echo -e "Make sure your clients or DoH upstream are configured to use port $DNS_PORT."
+  fi
   echo "You can now configure your clients to use DNS-over-HTTPS via:"
   echo "https://$DOMAIN/dns-query"
 }
@@ -678,14 +717,6 @@ cleanup() {
   done
 }
 trap cleanup EXIT
-
-# ====== Default blocked sites list ======
-DEFAULT_SITES=("youtube.com" "instagram.com" "facebook.com" "telegram.org" "twitter.com" "t.me" "discord.com" "spotify.com")
-
-SITES_FILE="/etc/bind/zones/sites.list"
-ZONES_FILE="/etc/bind/zones/blocklist.zones"
-SERVICE_BIND=""
-SERVICE_DOH="doh-server"
 
 # ====== Main Menu ======
 main_menu() {

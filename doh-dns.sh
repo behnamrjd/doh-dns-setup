@@ -231,6 +231,7 @@ reset_everything() {
   sudo rm -f /etc/nginx/sites-available/doh_dns_* /etc/nginx/sites-enabled/doh_dns_*
   sudo rm -rf "$ZONES_DIR"
   sudo rm -f /usr/local/bin/doh-server /etc/systemd/system/doh-server.service
+  sudo rm -rf /etc/dns-over-https
   if [ -f "$SITES_FILE" ]; then
     mapfile -t domains < "$SITES_FILE"
     for d in "${domains[@]}"; do
@@ -590,6 +591,7 @@ uninstall_doh_server() {
   print_info "Removing DoH server..."
   systemctl stop doh-server || true
   rm -f /usr/local/bin/doh-server /etc/systemd/system/doh-server.service
+  sudo rm -rf /etc/dns-over-https
   print_info "DoH server removed."
 }
 

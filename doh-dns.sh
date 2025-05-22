@@ -16,24 +16,20 @@ else
   RED=''; GREEN=''; YELLOW=''; NC=''; MAGENTA=''; CYAN='';
 fi
 
-# ====== Print Functions ======
 print_error() { echo -e "${RED}ERROR: $1${NC}"; }
 print_info()  { echo -e "${GREEN}INFO: $1${NC}"; }
 print_warn()  { echo -e "${YELLOW}WARNING: $1${NC}"; }
 
-# ====== Interactive Shell Check ======
 if ! [ -t 0 ]; then
   print_error "This script must be run in an interactive shell."
   exit 1
 fi
 
-# ====== Check for apt Package Manager ======
 if ! command -v apt &> /dev/null; then
   print_error "This script only supports Debian/Ubuntu systems with apt package manager."
   exit 1
 fi
 
-# ====== Disk Space Check ======
 check_disk_space() {
   for mount in / /etc /var; do
     local avail=$(df "$mount" | tail -1 | awk '{print $4}')
@@ -44,7 +40,6 @@ check_disk_space() {
   done
 }
 
-# ====== Input Validation Functions ======
 validate_domain() {
   [[ "$1" =~ ^([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}$ ]]
 }
@@ -55,9 +50,7 @@ validate_port() {
   [[ "$1" =~ ^[0-9]{2,5}$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
 }
 
-# ====== BIND Service Detection and Status ======
 detect_bind_service() {
-  # Prefer named.service if present, fallback to bind9.service
   if systemctl list-unit-files | grep -q "named.service"; then
     SERVICE_BIND="named"
   elif systemctl list-unit-files | grep -q "bind9.service"; then
@@ -92,8 +85,6 @@ check_service_running() {
   fi
   return 0
 }
-
-# ====== Internet Connectivity Check ======
 check_internet() {
   print_info "Checking internet connectivity..."
   if ! ping -c 1 1.1.1.1 >/dev/null 2>&1 && ! ping6 -c 1 2606:4700:4700::1111 >/dev/null 2>&1; then
@@ -102,8 +93,6 @@ check_internet() {
   fi
   print_info "Internet connectivity OK."
 }
-
-# ====== Firewall and Port Functions ======
 detect_firewall() {
   if command -v ufw >/dev/null 2>&1; then
     echo "ufw"
@@ -116,7 +105,6 @@ detect_firewall() {
   fi
 }
 open_ports() {
-  # Open required ports for DNS, HTTP, HTTPS, DoH
   local ports=("22" "53" "80" "443" "8053")
   local fw=$(detect_firewall)
   if [ "$fw" = "ufw" ]; then
@@ -137,7 +125,6 @@ open_ports() {
   fi
 }
 choose_dns_port() {
-  # Allow user to select alternate DNS port if 53 is busy
   local port=53
   if ss -tuln | grep -q ":53 "; then
     print_warn "Port 53 is already in use."
@@ -167,7 +154,6 @@ choose_dns_port() {
   DNS_PORT=$port
 }
 
-# ====== Backup & Full Reset Functions ======
 prompt_backup() {
   read -p "Would you like to back up important configuration files before proceeding? (y/n) " choice
   case "$choice" in
@@ -179,25 +165,18 @@ backup_configs() {
   sudo cp "$NAMED_CONF_LOCAL" "$NAMED_CONF_LOCAL.bak" 2>/dev/null || true
   sudo cp "$NAMED_OPTIONS" "$NAMED_OPTIONS.bak" 2>/dev/null || true
 }
-
 reset_everything() {
-  # Full cleanup: stop/disable all services, remove configs, clean up ports and files
   prompt_backup
   print_info "Resetting: Only files created by this script will be removed."
   sudo systemctl stop nginx doh-server bind9 named 2>/dev/null || true
   sudo systemctl disable bind9 named 2>/dev/null || true
-
-  # Remove custom listen-on port lines from BIND config
   if [ -f "$NAMED_OPTIONS" ]; then
     sudo sed -i '/listen-on port/d' "$NAMED_OPTIONS"
     sudo sed -i '/listen-on-v6 port/d' "$NAMED_OPTIONS"
   fi
-
   sudo rm -f /etc/nginx/sites-available/doh_dns_* /etc/nginx/sites-enabled/doh_dns_*
   sudo rm -rf "$ZONES_DIR"
   sudo rm -f /usr/local/bin/doh-server /etc/systemd/system/doh-server.service
-
-  # Remove Let's Encrypt certs for all domains in sites.list
   if [ -f "$SITES_FILE" ]; then
     mapfile -t domains < "$SITES_FILE"
     for d in "${domains[@]}"; do
@@ -206,25 +185,18 @@ reset_everything() {
   fi
   sudo rm -rf /var/log/letsencrypt
   sudo rm -f "$SITES_FILE"
-
-  # Remove any broken include or zone lines from named.conf.local
   if [ -f "$NAMED_CONF_LOCAL" ]; then
     sudo sed -i '/blocklist\.zones/d' "$NAMED_CONF_LOCAL"
     sudo sed -i '/zone.*{/,/};/d' "$NAMED_CONF_LOCAL"
   fi
-
-  # Ensure empty zone file exists to avoid BIND errors
   sudo mkdir -p "$ZONES_DIR"
   sudo touch "$ZONES_FILE"
-
   sudo systemctl daemon-reload
   sudo systemctl restart networking 2>/dev/null || true
   sudo systemctl start nginx 2>/dev/null || true
-
   print_info "Reset complete. Main system files are not deleted and all previous DNS ports are now free."
 }
 
-# ====== Website List Management ======
 read_sites() {
   if [ -f "$SITES_FILE" ]; then
     mapfile -t sites < "$SITES_FILE"
@@ -285,7 +257,6 @@ remove_site() {
   fi
 }
 
-# ====== Dependency Installation (with Verification) ======
 install_prerequisites() {
   print_info "Installing prerequisite tools..."
   apt update || { print_error "Failed to update package lists."; exit 1; }
@@ -334,7 +305,6 @@ install_dependencies() {
   print_info "All dependencies installed and verified."
 }
 
-# ====== BIND Zone Conflict Check ======
 check_zone_conflict() {
   local domain="$1"
   local found=$(grep -r "zone \"$domain\"" /etc/bind/ 2>/dev/null | grep -v blocklist.zones || true)
@@ -345,8 +315,6 @@ check_zone_conflict() {
   fi
   return 0
 }
-
-# ====== BIND Install/Uninstall ======
 install_bind() {
   read_sites
   for domain in "${sites[@]}"; do
@@ -378,7 +346,6 @@ uninstall_bind() {
   print_info "BIND removed."
 }
 
-# ====== Nginx Conflict & Install/Uninstall ======
 nginx_domain_conflict() {
   local domain="$1"
   local port="$2"
@@ -414,6 +381,48 @@ install_nginx() {
   systemctl enable nginx
   check_service_running nginx || exit 1
 }
+
+# ====== SSL Certificate Logic (Smart) ======
+obtain_ssl_certificate() {
+  local DOMAIN="$1"
+  local EMAIL="$2"
+  local CERT_PATH="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
+  local KEY_PATH="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+
+  # Check port 443 and 80 status
+  local PORT443_FREE=1
+  local PORT80_FREE=1
+  ss -tuln | grep -q ":443 " || PORT443_FREE=0
+  ss -tuln | grep -q ":80 " || PORT80_FREE=0
+
+  if [ "$PORT443_FREE" -eq 1 ]; then
+    print_info "Port 443 is free. Using certbot nginx plugin to obtain SSL certificate."
+    certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" > /tmp/certbot.log 2>&1 || {
+      print_error "Failed to obtain SSL certificate using nginx plugin. See /tmp/certbot.log"
+      exit 1
+    }
+  elif [ "$PORT80_FREE" -eq 1 ]; then
+    print_info "Port 443 is busy but port 80 is free. Using certbot standalone plugin on port 80."
+    systemctl stop nginx || true
+    certbot certonly --standalone --preferred-challenges http -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" > /tmp/certbot.log 2>&1 || {
+      print_error "Failed to obtain SSL certificate using standalone plugin. See /tmp/certbot.log"
+      systemctl start nginx || true
+      exit 1
+    }
+    systemctl start nginx || true
+  else
+    print_error "Neither port 443 nor 80 is free. Cannot obtain SSL certificate automatically."
+    print_warn "Please free up port 80 or 443 and re-run the script, or obtain the certificate manually."
+    exit 1
+  fi
+
+  # Check if certificate files exist
+  if [ ! -f "$CERT_PATH" ] || [ ! -f "$KEY_PATH" ]; then
+    print_error "SSL certificate was not created."
+    exit 1
+  fi
+}
+
 setup_nginx_ssl() {
   local DOMAIN="$1"
   local EMAIL="$2"
@@ -456,6 +465,10 @@ setup_nginx_ssl() {
     [[ "$cont" =~ ^[Yy]$ ]] || exit 1
   fi
 
+  # Obtain SSL certificate before writing nginx config
+  obtain_ssl_certificate "$DOMAIN" "$EMAIL"
+
+  # Now write nginx config for DoH (on chosen port)
   if [ ! -f "$NGINX_CONF" ]; then
     cat > "$NGINX_CONF" << EOF
 server {
@@ -472,20 +485,6 @@ server {
 }
 EOF
     ln -sf "$NGINX_CONF" "$NGINX_LINK"
-  fi
-
-  if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
-    print_info "Obtaining SSL certificate with Certbot..."
-    certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" > /tmp/certbot.log 2>&1 || {
-      print_error "Failed to obtain SSL certificate. See /tmp/certbot.log"
-      rm -f "$NGINX_CONF" "$NGINX_LINK"
-      exit 1
-    }
-    if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
-      print_error "SSL certificate was not created."
-      rm -f "$NGINX_CONF" "$NGINX_LINK"
-      exit 1
-    fi
   fi
 
   if ! nginx -t 2>&1 | tee /tmp/nginx_test.log | grep -q "successful"; then
@@ -505,7 +504,6 @@ uninstall_nginx() {
   print_info "Nginx removed."
 }
 
-# ====== DoH Server Management ======
 install_doh_server() {
   check_make
   if ! command -v git &> /dev/null; then
@@ -662,7 +660,6 @@ restart_bind() {
   fi
 }
 
-# ====== DNS Test ======
 test_dns_forwarding() {
   print_info "Testing DNS forwarding for a sample domain..."
   if ! command -v dig &> /dev/null; then
@@ -689,7 +686,6 @@ check_root() {
   fi
 }
 
-# ====== Main Install/Uninstall Logic ======
 install_service() {
   check_root
   check_disk_space
@@ -748,7 +744,6 @@ check_if_installed() {
   fi
 }
 
-# ====== Temp File Cleanup ======
 TMPFILES=()
 cleanup() {
   for f in "${TMPFILES[@]}"; do
@@ -757,7 +752,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ====== Defaults and Main Menu ======
 DEFAULT_SITES=("youtube.com" "instagram.com" "facebook.com" "telegram.org" "twitter.com" "t.me" "discord.com" "spotify.com")
 SERVICE_BIND=""
 SERVICE_DOH="doh-server"

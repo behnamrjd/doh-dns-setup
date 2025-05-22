@@ -796,7 +796,10 @@ uninstall_service() {
   print_info "All services uninstalled. Some configuration files may remain; remove them manually if needed."
 }
 check_if_installed() {
-  if [ -f "$SITES_FILE" ] || systemctl is-active --quiet "$SERVICE_BIND"; then
+  if [ -f "$SITES_FILE" ] && \
+     systemctl is-active --quiet "$SERVICE_BIND" && \
+     systemctl is-active --quiet nginx && \
+     systemctl is-active --quiet doh-server; then
     return 0
   else
     return 1

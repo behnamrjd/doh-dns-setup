@@ -1,8 +1,8 @@
 #!/bin/bash
 
-DOMAIN="dns.dnsly.fun"      # دامنه خودت را اینجا بگذار
-DNS_PORT=1053                 # اگر پورت DNS را تغییر دادی اینجا هم تغییر بده
-DOH_PORT=8443                # اگر پورت nginx را تغییر دادی اینجا هم تغییر بده (مثلاً 8443)
+DOMAIN="dns.dnsly.fun"
+DNS_PORT=1053
+DOH_PORT=8443
 DOH_PATH="/dns-query"
 
 RED='\033[0;31m'
@@ -53,7 +53,6 @@ else
 fi
 
 echo -e "${YELLOW}Testing DoH server with curl...${NC}"
-# نمونه query: google.com (base64url encoded DNS query)
 DNS_QUERY="AAABAAABAAAAAAAAB2dvb2dsZQNjb20AAAEAAQ"
 if curl -sk "https://$DOMAIN:$DOH_PORT$DOH_PATH?dns=$DNS_QUERY" -H 'accept: application/dns-message' | grep -q .; then
   ok "DoH server responds to DNS-over-HTTPS queries"

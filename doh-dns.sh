@@ -99,9 +99,6 @@ validate_domain() {
 validate_email() {
   [[ "$1" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]
 }
-validate_port() {
-  [[ "$1" =~ ^[0-9]{2,5}$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
-}
 
 # ====== BIND Service Detection and Status ======
 detect_bind_service() {
@@ -177,35 +174,6 @@ open_ports() {
   else
     print_info "No firewall detected. Please ensure required ports (22,53,80,443,8053) are open."
   fi
-}
-choose_dns_port() {
-  local port=53
-  if ss -tuln | grep -q ":53 "; then
-    print_warn "Port 53 is already in use."
-    while true; do
-      read -p "Do you want to use a different port for DNS? (y/N): " ans
-      if [[ "$ans" =~ ^[Yy]$ ]]; then
-        while true; do
-          read -p "Enter alternative port number (e.g. 1053): " newport
-          if validate_port "$newport"; then
-            if ss -tuln | grep -q ":$newport "; then
-              print_error "Port $newport is also in use. Please choose another port."
-            else
-              port=$newport
-              break
-            fi
-          else
-            print_error "Invalid port number."
-          fi
-        done
-        break
-      elif [[ "$ans" =~ ^[Nn]$|^$ ]]; then
-        print_error "Port 53 is in use. Exiting."
-        exit 1
-      fi
-    done
-  fi
-  DNS_PORT=$port
 }
 
 prompt_backup() {
@@ -402,29 +370,6 @@ uninstall_bind() {
   print_info "BIND removed."
 }
 
-nginx_domain_conflict() {
-  local domain="$1"
-  local port="$2"
-  for conf in /etc/nginx/sites-enabled/*; do
-    [ -f "$conf" ] || continue
-    if grep -q "server_name.*$domain" "$conf" && grep -q "listen $port" "$conf"; then
-      echo "$conf"
-      return 0
-    fi
-  done
-  return 1
-}
-nginx_port_conflict() {
-  local port="$1"
-  for conf in /etc/nginx/sites-enabled/*; do
-    [ -f "$conf" ] || continue
-    if grep -q "listen $port" "$conf"; then
-      echo "$conf"
-      return 0
-    fi
-  done
-  return 1
-}
 install_nginx() {
   print_info "Checking for existing Nginx configuration conflicts..."
   apt install -y nginx certbot python3-certbot-nginx
@@ -445,31 +390,27 @@ obtain_ssl_certificate() {
   local CERT_PATH="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
   local KEY_PATH="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
 
-  local PORT443_FREE=1
-  local PORT80_FREE=1
-  ss -tuln | grep -q ":443 " || PORT443_FREE=0
-  ss -tuln | grep -q ":80 " || PORT80_FREE=0
-
-  if [ "$PORT443_FREE" -eq 1 ]; then
-    print_info "Port 443 is free. Using certbot nginx plugin to obtain SSL certificate."
-    certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" > /tmp/certbot.log 2>&1 || {
-      print_error "Failed to obtain SSL certificate using nginx plugin. See /tmp/certbot.log"
+  # Always use port 443, forcibly free it if needed
+  if ss -tuln | grep -q ":443 "; then
+    print_warn "Port 443 is in use. Attempting to stop possible conflicting services..."
+    for svc in nginx apache2 httpd lighttpd caddy haproxy; do
+      if systemctl is-active --quiet $svc; then
+        print_warn "Stopping $svc to free port 443."
+        systemctl stop $svc || true
+      fi
+    done
+    sleep 1
+    if ss -tuln | grep -q ":443 "; then
+      print_error "Port 443 is still in use after stopping common web servers. Please free port 443 and re-run the script."
       exit 1
-    }
-  elif [ "$PORT80_FREE" -eq 1 ]; then
-    print_info "Port 443 is busy but port 80 is free. Using certbot standalone plugin on port 80."
-    systemctl stop nginx || true
-    certbot certonly --standalone --preferred-challenges http -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" > /tmp/certbot.log 2>&1 || {
-      print_error "Failed to obtain SSL certificate using standalone plugin. See /tmp/certbot.log"
-      systemctl start nginx || true
-      exit 1
-    }
-    systemctl start nginx || true
-  else
-    print_error "Neither port 443 nor 80 is free. Cannot obtain SSL certificate automatically."
-    print_warn "Please free up port 80 or 443 and re-run the script, or obtain the certificate manually."
-    exit 1
+    fi
   fi
+
+  print_info "Obtaining SSL certificate on port 443 with certbot nginx plugin."
+  certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" > /tmp/certbot.log 2>&1 || {
+    print_error "Failed to obtain SSL certificate using nginx plugin. See /tmp/certbot.log"
+    exit 1
+  }
 
   if [ ! -f "$CERT_PATH" ] || [ ! -f "$KEY_PATH" ]; then
     print_error "SSL certificate was not created."
@@ -483,26 +424,6 @@ setup_nginx_ssl() {
   local NGINX_CONF="/etc/nginx/sites-available/doh_dns_$DOMAIN"
   local NGINX_LINK="/etc/nginx/sites-enabled/doh_dns_$DOMAIN"
   local PORT=443
-
-  local conflict_file
-  conflict_file=$(nginx_domain_conflict "$DOMAIN" "$PORT") && {
-    print_error "A virtual host for $DOMAIN on port $PORT already exists in nginx: $conflict_file"
-    exit 1
-  }
-  conflict_file=$(nginx_port_conflict "$PORT") && {
-    print_warn "Port $PORT is already used by another nginx site: $conflict_file"
-    read -p "Do you want to use an alternative port (e.g. 8443)? [y/N]: " use_alt
-    if [[ "$use_alt" =~ ^[Yy]$ ]]; then
-      read -p "Enter alternative port number: " PORT
-      conflict_file=$(nginx_port_conflict "$PORT") && {
-        print_error "Selected port $PORT is also in use: $conflict_file"
-        exit 1
-      }
-    else
-      print_error "Cannot continue with port conflict."
-      exit 1
-    fi
-  }
 
   print_info "Checking if domain $DOMAIN resolves to this server's IP..."
   SERVER_IP=$(curl -s -4 ifconfig.me || wget -qO- -4 ipinfo.io/ip)
@@ -603,7 +524,7 @@ listen = [ ":8053" ]
 cert = "/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
 key = "/etc/letsencrypt/live/$DOMAIN/privkey.pem"
 path = "/dns-query"
-upstream = [ "udp:127.0.0.1:$DNS_PORT" ]
+upstream = [ "udp:127.0.0.1:53" ]
 timeout = 10
 tries = 3
 verbose = false
@@ -639,14 +560,14 @@ options {
   forward only;
   dnssec-validation auto;
   auth-nxdomain no;
-  listen-on port $DNS_PORT { any; };
-  listen-on-v6 port $DNS_PORT { any; };
+  listen-on port 53 { any; };
+  listen-on-v6 port 53 { any; };
   allow-query { any; };
 };
 EOF
   else
-    sed -i "/listen-on {/a\    listen-on port $DNS_PORT { any; };" "$NAMED_OPTIONS"
-    sed -i "/listen-on-v6 {/a\    listen-on-v6 port $DNS_PORT { any; };" "$NAMED_OPTIONS"
+    sed -i "/listen-on {/a\    listen-on port 53 { any; };" "$NAMED_OPTIONS"
+    sed -i "/listen-on-v6 {/a\    listen-on-v6 port 53 { any; };" "$NAMED_OPTIONS"
   fi
 }
 setup_bind_zones() {
@@ -731,7 +652,7 @@ test_dns_forwarding() {
     print_error "No domains available for testing. Skipping DNS test."
     return
   fi
-  if dig @"127.0.0.1" -p "$DNS_PORT" "$test_domain" A +short | grep -q .; then
+  if dig @"127.0.0.1" -p 53 "$test_domain" A +short | grep -q .; then
     print_info "DNS forwarding test passed for $test_domain."
   else
     print_error "DNS forwarding test failed for $test_domain."
@@ -750,7 +671,6 @@ install_service() {
   check_disk_space
   check_internet
   detect_bind_service
-  choose_dns_port
   while true; do
     read -rp "Enter your domain (e.g. dns.example.com): " DOMAIN
     if validate_domain "$DOMAIN"; then break; else print_error "Invalid domain format."; fi
@@ -779,13 +699,12 @@ install_service() {
   setup_doh_service "$DOMAIN"
   test_dns_forwarding
   echo
-  echo "Setup complete!"
-  if [ "$DNS_PORT" != "53" ]; then
-    echo -e "${YELLOW}NOTE:${NC} Your DNS server is running on port $DNS_PORT instead of 53."
-    echo -e "Make sure your clients or DoH upstream are configured to use port $DNS_PORT."
-  fi
-  echo "You can now configure your clients to use DNS-over-HTTPS via:"
-  echo "https://$DOMAIN/dns-query"
+  echo -e "${GREEN}=============================================="
+  echo -e "  Your DNS-over-HTTPS (DoH) URL for clients:"
+  echo -e "${CYAN}  https://$DOMAIN/dns-query"
+  echo -e "${GREEN}==============================================${NC}"
+  echo "Add this link in your browser, Secure DNS Client, Android Private DNS, or any DoH-compatible app."
+  echo
 }
 uninstall_service() {
   check_root
@@ -817,7 +736,6 @@ trap cleanup EXIT
 DEFAULT_SITES=("youtube.com" "instagram.com" "facebook.com" "telegram.org" "twitter.com" "t.me" "discord.com" "spotify.com")
 SERVICE_BIND=""
 SERVICE_DOH="doh-server"
-DNS_PORT=53
 
 main_menu() {
   while true; do

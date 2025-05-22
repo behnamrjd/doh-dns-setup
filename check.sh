@@ -1,8 +1,8 @@
 #!/bin/bash
 
-DOMAIN="dns.dnsly.fun"      # دامنه خودت را اینجا بگذار
-DNS_PORT=1053                 # اگر پورت DNS را تغییر دادی اینجا هم تغییر بده
-DOH_PORT=8443                # اگر پورت nginx را تغییر دادی اینجا هم تغییر بده (مثلاً 8443)
+DOMAIN="dns.dnsly.fun"
+DNS_PORT=1053
+DOH_PORT=8443
 DOH_PATH="/dns-query"
 
 RED='\033[0;31m'

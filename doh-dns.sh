@@ -49,10 +49,10 @@ validate_port() {
 
 # ====== Service Detection & Status ======
 detect_bind_service() {
-  if systemctl list-unit-files | grep -q "bind9.service"; then
-    SERVICE_BIND="bind9"
-  elif systemctl list-unit-files | grep -q "named.service"; then
+  if systemctl list-unit-files | grep -q "named.service"; then
     SERVICE_BIND="named"
+  elif systemctl list-unit-files | grep -q "bind9.service"; then
+    SERVICE_BIND="bind9"
   else
     print_error "Could not detect BIND service. Make sure BIND is installed."
     exit 1
@@ -336,8 +336,7 @@ install_bind() {
     exit 1
   fi
   print_info "Restarting BIND service..."
-  systemctl restart "$SERVICE_BIND" || { print_error "Failed to restart BIND."; exit 1; }
-  systemctl enable "$SERVICE_BIND"
+  restart_bind
   check_service_running "$SERVICE_BIND" || exit 1
 }
 uninstall_bind() {
@@ -618,8 +617,20 @@ check_bind_config() {
   fi
 }
 restart_bind() {
-  systemctl restart "$SERVICE_BIND" || { print_error "Failed to restart BIND."; exit 1; }
-  systemctl enable "$SERVICE_BIND"
+  # Restart and enable the correct service (named or bind9)
+  if systemctl list-unit-files | grep -q "named.service"; then
+    systemctl restart named || { print_error "Failed to restart named."; exit 1; }
+    systemctl enable named || print_warn "Could not enable named.service (may already be enabled)."
+    SERVICE_BIND="named"
+  elif systemctl list-unit-files | grep -q "bind9.service"; then
+    systemctl restart bind9 || { print_error "Failed to restart bind9."; exit 1; }
+    # Do not enable bind9.service directly (may be alias), try enabling named
+    systemctl enable named || print_warn "Could not enable named.service (may already be enabled)."
+    SERVICE_BIND="bind9"
+  else
+    print_error "Neither named.service nor bind9.service found."
+    exit 1
+  fi
 }
 
 # ====== DNS Test ======

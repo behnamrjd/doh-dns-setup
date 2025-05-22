@@ -256,10 +256,7 @@ check_bind_config() {
 
 restart_bind() {
   systemctl restart "$SERVICE_BIND" || { print_error "Failed to restart BIND. Check logs with 'journalctl -u $SERVICE_BIND'."; exit 1; }
-  # Only enable if main service is named, not bind9 (bind9 is just an alias)
-  if [ "$SERVICE_BIND" = "named" ]; then
-    systemctl enable named
-  fi
+  systemctl enable "$SERVICE_BIND"
   print_info "BIND restarted and enabled."
 }
 
@@ -434,12 +431,7 @@ reset_everything() {
 
   # Stop services
   systemctl stop nginx doh-server bind9 named 2>/dev/null || true
-
-  # Only disable named, not bind9
-  if systemctl list-unit-files | grep -q "named.service"; then
-    systemctl disable named 2>/dev/null || true
-  fi
-  systemctl disable nginx doh-server bind9 2>/dev/null || true
+  systemctl disable nginx doh-server bind9 named 2>/dev/null || true
 
   # Remove nginx DoH config
   rm -f /etc/nginx/sites-available/doh_dns /etc/nginx/sites-enabled/doh_dns
@@ -517,10 +509,7 @@ uninstall_service() {
   detect_bind_service
   print_info "Uninstalling services..."
   systemctl stop "$SERVICE_BIND" "$SERVICE_DOH" || true
-  # Only disable if main service is named, not bind9 (bind9 is just an alias)
-  if [ "$SERVICE_BIND" = "named" ]; then
-    systemctl disable named
-  fi
+  systemctl disable "$SERVICE_BIND" "$SERVICE_DOH" || true
   apt purge -y bind9 bind9utils bind9-doc nginx certbot python3-certbot-nginx || {
     print_error "Failed to uninstall packages. Check manually."
   }
@@ -530,7 +519,7 @@ uninstall_service() {
 }
 
 check_if_installed() {
-  if [ -f "$SITES_FILE" ] || systemctl is-active --quiet "$SERVICE_BIND"; then
+  if [ -f "$SITES_FILE" ] || ( [ -n "$SERVICE_BIND" ] && systemctl is-active --quiet "$SERVICE_BIND" ); then
     return 0
   else
     return 1
@@ -566,8 +555,8 @@ main_menu() {
   done
 }
 
-detect_bind_service
 if check_if_installed; then
+  detect_bind_service
   main_menu
 else
   install_service

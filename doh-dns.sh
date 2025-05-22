@@ -8,24 +8,20 @@ else
   RED=''; GREEN=''; YELLOW=''; NC=''; MAGENTA=''; CYAN='';
 fi
 
-# ====== Utility Functions ======
 print_error() { echo -e "${RED}ERROR: $1${NC}"; }
 print_info()  { echo -e "${GREEN}INFO: $1${NC}"; }
 print_warn()  { echo -e "${YELLOW}WARNING: $1${NC}"; }
 
-# ====== Non-interactive shell check ======
 if ! [ -t 0 ]; then
   print_error "This script must be run in an interactive shell."
   exit 1
 fi
 
-# ====== Check for apt ======
 if ! command -v apt &> /dev/null; then
   print_error "This script only supports Debian/Ubuntu systems with apt package manager."
   exit 1
 fi
 
-# ====== Disk Space Check ======
 check_disk_space() {
   for mount in / /etc /var; do
     local avail=$(df "$mount" | tail -1 | awk '{print $4}')
@@ -36,7 +32,6 @@ check_disk_space() {
   done
 }
 
-# ====== Validation Functions ======
 validate_domain() {
   [[ "$1" =~ ^([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}$ ]]
 }
@@ -47,7 +42,6 @@ validate_port() {
   [[ "$1" =~ ^[0-9]{2,5}$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
 }
 
-# ====== Service Detection & Status ======
 detect_bind_service() {
   if systemctl list-unit-files | grep -q "named.service"; then
     SERVICE_BIND="named"
@@ -71,7 +65,6 @@ service_status() {
   local enabled=$(systemctl is-enabled "$name" 2>/dev/null)
   echo -e "${CYAN}$name:${NC} Status: $active | Enabled: $enabled"
 }
-
 check_service_running() {
   local name="$1"
   if ! service_exists "$name"; then
@@ -84,8 +77,6 @@ check_service_running() {
   fi
   return 0
 }
-
-# ====== Internet Connectivity Check ======
 check_internet() {
   print_info "Checking internet connectivity..."
   if ! ping -c 1 1.1.1.1 >/dev/null 2>&1 && ! ping6 -c 1 2606:4700:4700::1111 >/dev/null 2>&1; then
@@ -94,8 +85,6 @@ check_internet() {
   fi
   print_info "Internet connectivity OK."
 }
-
-# ====== Port/Firewall ======
 detect_firewall() {
   if command -v ufw >/dev/null 2>&1; then
     echo "ufw"
@@ -127,8 +116,6 @@ open_ports() {
     print_info "No firewall detected. Please ensure required ports (22,53,80,443,8053) are open."
   fi
 }
-
-# ====== DNS Port Selection ======
 choose_dns_port() {
   local port=53
   if ss -tuln | grep -q ":53 "; then
@@ -159,7 +146,6 @@ choose_dns_port() {
   DNS_PORT=$port
 }
 
-# ====== Backup & Reset ======
 prompt_backup() {
   read -p "Would you like to back up important configuration files before proceeding? (y/n) " choice
   case "$choice" in
@@ -174,7 +160,13 @@ backup_configs() {
 reset_everything() {
   prompt_backup
   print_info "Resetting: Only files created by this script will be removed."
-  sudo systemctl stop nginx doh-server "$SERVICE_BIND" 2>/dev/null || true
+  sudo systemctl stop nginx doh-server bind9 named 2>/dev/null || true
+  sudo systemctl disable bind9 named 2>/dev/null || true
+
+  # Remove listen-on port lines from bind config (restores port to default and frees all custom ports)
+  sudo sed -i '/listen-on port/d' /etc/bind/named.conf.options
+  sudo sed -i '/listen-on-v6 port/d' /etc/bind/named.conf.options
+
   sudo rm -f /etc/nginx/sites-available/doh_dns_* /etc/nginx/sites-enabled/doh_dns_*
   sudo rm -rf /etc/bind/zones
   sudo rm -f /usr/local/bin/doh-server /etc/systemd/system/doh-server.service
@@ -189,16 +181,8 @@ reset_everything() {
   sudo systemctl daemon-reload
   sudo systemctl restart networking 2>/dev/null || true
   sudo systemctl start nginx 2>/dev/null || true
-  print_info "Reset complete. Main system files are not deleted."
+  print_info "Reset complete. Main system files are not deleted and all previous DNS ports are now free."
 }
-
-# ====== Site Management ======
-DEFAULT_SITES=("youtube.com" "instagram.com" "facebook.com" "telegram.org" "twitter.com" "t.me" "discord.com" "spotify.com")
-SITES_FILE="/etc/bind/zones/sites.list"
-ZONES_FILE="/etc/bind/zones/blocklist.zones"
-SERVICE_BIND=""
-SERVICE_DOH="doh-server"
-DNS_PORT=53
 
 read_sites() {
   if [ -f "$SITES_FILE" ]; then
@@ -259,7 +243,6 @@ remove_site() {
   fi
 }
 
-# ====== Dependency Installation with Verification ======
 install_prerequisites() {
   print_info "Installing prerequisite tools..."
   apt update || { print_error "Failed to update package lists."; exit 1; }
@@ -281,7 +264,6 @@ install_prerequisites() {
   fi
   print_info "Prerequisite tools installed."
 }
-
 check_make() {
   if ! command -v make &> /dev/null; then
     print_info "make not found. Installing make..."
@@ -294,7 +276,6 @@ check_make() {
     print_info "make installed successfully."
   fi
 }
-
 install_dependencies() {
   print_info "Updating and installing dependencies..."
   apt update || { print_error "Failed to update package lists."; exit 1; }
@@ -310,7 +291,6 @@ install_dependencies() {
   print_info "All dependencies installed and verified."
 }
 
-# ====== BIND Management ======
 check_zone_conflict() {
   local domain="$1"
   local found=$(grep -r "zone \"$domain\"" /etc/bind/ 2>/dev/null | grep -v blocklist.zones || true)
@@ -346,7 +326,6 @@ uninstall_bind() {
   print_info "BIND removed."
 }
 
-# ====== Nginx & SSL Management ======
 nginx_domain_conflict() {
   local domain="$1"
   local port="$2"
@@ -473,7 +452,6 @@ uninstall_nginx() {
   print_info "Nginx removed."
 }
 
-# ====== DoH Server Management ======
 install_doh_server() {
   check_make
   if ! command -v git &> /dev/null; then
@@ -537,12 +515,10 @@ EOF
   check_service_running doh-server || exit 1
 }
 
-# ====== Zone Management ======
 setup_bind_forwarders() {
   NAMED_OPTIONS="/etc/bind/named.conf.options"
-  # Remove any previous listen-on port lines to avoid duplicates
-  sed -i '/listen-on port/d' "$NAMED_OPTIONS"
-  sed -i '/listen-on-v6 port/d' "$NAMED_OPTIONS"
+  sudo sed -i '/listen-on port/d' "$NAMED_OPTIONS"
+  sudo sed -i '/listen-on-v6 port/d' "$NAMED_OPTIONS"
   if ! grep -q "forwarders {" "$NAMED_OPTIONS"; then
     cat >> "$NAMED_OPTIONS" << EOF
 options {
@@ -557,7 +533,6 @@ options {
 };
 EOF
   else
-    # Add/replace listen-on port and listen-on-v6 port lines
     sed -i "/listen-on {/a\    listen-on port $DNS_PORT { any; };" "$NAMED_OPTIONS"
     sed -i "/listen-on-v6 {/a\    listen-on-v6 port $DNS_PORT { any; };" "$NAMED_OPTIONS"
   fi
@@ -617,14 +592,12 @@ check_bind_config() {
   fi
 }
 restart_bind() {
-  # Restart and enable the correct service (named or bind9)
   if systemctl list-unit-files | grep -q "named.service"; then
     systemctl restart named || { print_error "Failed to restart named."; exit 1; }
     systemctl enable named || print_warn "Could not enable named.service (may already be enabled)."
     SERVICE_BIND="named"
   elif systemctl list-unit-files | grep -q "bind9.service"; then
     systemctl restart bind9 || { print_error "Failed to restart bind9."; exit 1; }
-    # Do not enable bind9.service directly (may be alias), try enabling named
     systemctl enable named || print_warn "Could not enable named.service (may already be enabled)."
     SERVICE_BIND="bind9"
   else
@@ -632,8 +605,6 @@ restart_bind() {
     exit 1
   fi
 }
-
-# ====== DNS Test ======
 test_dns_forwarding() {
   print_info "Testing DNS forwarding for a sample domain..."
   if ! command -v dig &> /dev/null; then
@@ -653,8 +624,6 @@ test_dns_forwarding() {
     exit 1
   fi
 }
-
-# ====== Main Install/Uninstall Logic ======
 check_root() {
   if [ "$(id -u)" -ne 0 ]; then
     print_error "This script must be run as root"
@@ -720,7 +689,6 @@ check_if_installed() {
   fi
 }
 
-# ====== Trap for cleaning temp files ======
 TMPFILES=()
 cleanup() {
   for f in "${TMPFILES[@]}"; do
@@ -729,7 +697,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ====== Main Menu ======
 main_menu() {
   while true; do
     clear

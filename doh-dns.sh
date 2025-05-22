@@ -588,23 +588,36 @@ install_doh_server() {
 uninstall_doh_server() {
   print_info "Removing DoH server..."
   systemctl stop doh-server || true
-  rm -f /usr/local/bin/doh-server /etc/systemd/system/doh-server.service
+  rm -rf /usr/local/bin/doh-server /etc/systemd/system/doh-server.service
   print_info "DoH server removed."
 }
 setup_doh_service() {
   local DOMAIN="$1"
-  cat > /etc/systemd/system/doh-server.service << EOF
+  sudo mkdir -p /etc/dns-over-https
+  sudo tee /etc/dns-over-https/doh-server.conf > /dev/null <<EOF
+listen = [ ":8053" ]
+cert = "/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
+key = "/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+path = "/dns-query"
+upstream = [ "udp:127.0.0.1:$DNS_PORT" ]
+timeout = 10
+tries = 3
+verbose = false
+EOF
+
+  sudo tee /etc/systemd/system/doh-server.service > /dev/null << EOF
 [Unit]
 Description=DNS over HTTPS server (m13253)
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/doh-server -listen :8053 -cert /etc/letsencrypt/live/$DOMAIN/fullchain.pem -key /etc/letsencrypt/live/$DOMAIN/privkey.pem -upstream 127.0.0.1:$DNS_PORT
+ExecStart=/usr/local/bin/doh-server -conf /etc/dns-over-https/doh-server.conf
 Restart=always
 
 [Install]
 WantedBy=multi-user.target
 EOF
+
   systemctl daemon-reload
   systemctl enable --now doh-server || { print_error "Failed to start doh-server."; exit 1; }
   check_service_running doh-server || exit 1
@@ -789,7 +802,7 @@ check_if_installed() {
 TMPFILES=()
 cleanup() {
   for f in "${TMPFILES[@]}"; do
-    [ -e "$f" ] && rm -f "$f"
+    [ -e "$f" ] && rm -rf "$f"
   done
 }
 trap cleanup EXIT

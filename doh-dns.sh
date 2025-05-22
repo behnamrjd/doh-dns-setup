@@ -20,16 +20,68 @@ print_error() { echo -e "${RED}ERROR: $1${NC}"; }
 print_info()  { echo -e "${GREEN}INFO: $1${NC}"; }
 print_warn()  { echo -e "${YELLOW}WARNING: $1${NC}"; }
 
-if ! [ -t 0 ]; then
-  print_error "This script must be run in an interactive shell."
-  exit 1
-fi
+# ====== Go Version Check and Install ======
+check_and_install_go() {
+  REQUIRED_MAJOR=1
+  REQUIRED_MINOR=24
+  REQUIRED_PATCH=0
 
-if ! command -v apt &> /dev/null; then
-  print_error "This script only supports Debian/Ubuntu systems with apt package manager."
-  exit 1
-fi
+  # Check if Go is installed
+  if ! command -v go >/dev/null 2>&1; then
+    print_warn "Go is not installed. Installing Go 1.24.0 ..."
+    install_go
+    return
+  fi
 
+  GOVERSION=$(go version 2>/dev/null | awk '{print $3}') # e.g. go1.23.5
+  GOVERSION=${GOVERSION#go}
+  IFS='.' read -r MAJOR MINOR PATCH <<<"$GOVERSION"
+  PATCH=${PATCH:-0}
+
+  if [ "$MAJOR" -lt "$REQUIRED_MAJOR" ] || { [ "$MAJOR" -eq "$REQUIRED_MAJOR" ] && [ "$MINOR" -lt "$REQUIRED_MINOR" ]; } || { [ "$MAJOR" -eq "$REQUIRED_MAJOR" ] && [ "$MINOR" -eq "$REQUIRED_MINOR" ] && [ "$PATCH" -lt "$REQUIRED_PATCH" ]; }; then
+    print_warn "Go version is $GOVERSION, but >=1.24.0 is required. Installing latest Go ..."
+    install_go
+  else
+    print_info "Go version $GOVERSION is sufficient."
+  fi
+}
+
+install_go() {
+  ARCH=$(uname -m)
+  if [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; then
+    GOARCH="amd64"
+  elif [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]]; then
+    GOARCH="arm64"
+  else
+    print_error "Unsupported architecture: $ARCH"
+    exit 1
+  fi
+
+  GO_VERSION="1.24.0"
+  GO_TARBALL="go${GO_VERSION}.linux-${GOARCH}.tar.gz"
+  GO_URL="https://go.dev/dl/${GO_TARBALL}"
+
+  TMPDIR=$(mktemp -d)
+  print_info "Downloading $GO_URL ..."
+  wget -qO "$TMPDIR/$GO_TARBALL" "$GO_URL"
+
+  print_info "Removing any previous Go installation ..."
+  sudo rm -rf /usr/local/go
+
+  print_info "Extracting Go $GO_VERSION ..."
+  sudo tar -C /usr/local -xzf "$TMPDIR/$GO_TARBALL"
+
+  export PATH="/usr/local/go/bin:$PATH"
+  if ! grep -q '/usr/local/go/bin' ~/.profile 2>/dev/null; then
+    echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.profile
+  fi
+
+  rm -rf "$TMPDIR"
+
+  print_info "Go $(go version) installed and ready."
+}
+
+# ====== Disk Space Check ======
 check_disk_space() {
   for mount in / /etc /var; do
     local avail=$(df "$mount" | tail -1 | awk '{print $4}')
@@ -40,6 +92,7 @@ check_disk_space() {
   done
 }
 
+# ====== Input Validation Functions ======
 validate_domain() {
   [[ "$1" =~ ^([a-zA-Z0-9][-a-zA-Z0-9]*\.)+[a-zA-Z]{2,}$ ]]
 }
@@ -50,6 +103,7 @@ validate_port() {
   [[ "$1" =~ ^[0-9]{2,5}$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
 }
 
+# ====== BIND Service Detection and Status ======
 detect_bind_service() {
   if systemctl list-unit-files | grep -q "named.service"; then
     SERVICE_BIND="named"
@@ -197,6 +251,7 @@ reset_everything() {
   print_info "Reset complete. Main system files are not deleted and all previous DNS ports are now free."
 }
 
+# ====== Website List Management ======
 read_sites() {
   if [ -f "$SITES_FILE" ]; then
     mapfile -t sites < "$SITES_FILE"
@@ -389,7 +444,6 @@ obtain_ssl_certificate() {
   local CERT_PATH="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
   local KEY_PATH="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
 
-  # Check port 443 and 80 status
   local PORT443_FREE=1
   local PORT80_FREE=1
   ss -tuln | grep -q ":443 " || PORT443_FREE=0
@@ -416,7 +470,6 @@ obtain_ssl_certificate() {
     exit 1
   fi
 
-  # Check if certificate files exist
   if [ ! -f "$CERT_PATH" ] || [ ! -f "$KEY_PATH" ]; then
     print_error "SSL certificate was not created."
     exit 1
@@ -465,10 +518,8 @@ setup_nginx_ssl() {
     [[ "$cont" =~ ^[Yy]$ ]] || exit 1
   fi
 
-  # Obtain SSL certificate before writing nginx config
   obtain_ssl_certificate "$DOMAIN" "$EMAIL"
 
-  # Now write nginx config for DoH (on chosen port)
   if [ ! -f "$NGINX_CONF" ]; then
     cat > "$NGINX_CONF" << EOF
 server {
@@ -506,21 +557,13 @@ uninstall_nginx() {
 
 install_doh_server() {
   check_make
+  check_and_install_go
   if ! command -v git &> /dev/null; then
     print_info "git not found. Installing git..."
     apt update
     apt install -y git || { print_error "Failed to install git."; exit 1; }
     if ! command -v git &> /dev/null; then
       print_error "git failed to install."
-      exit 1
-    fi
-  fi
-  if ! command -v go &> /dev/null; then
-    print_info "Installing Go..."
-    apt update
-    apt install -y golang
-    if ! command -v go &> /dev/null; then
-      print_error "Go failed to install."
       exit 1
     fi
   fi
@@ -567,7 +610,6 @@ EOF
   check_service_running doh-server || exit 1
 }
 
-# ====== BIND Forwarders and Zone File Setup ======
 setup_bind_forwarders() {
   sudo mkdir -p "$ZONES_DIR"
   sudo sed -i '/listen-on port/d' "$NAMED_OPTIONS"

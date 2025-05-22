@@ -266,7 +266,7 @@ install_prerequisites() {
   apt install -y curl wget dnsutils iproute2 net-tools || {
     print_error "Failed to install prerequisite tools."; exit 1;
   }
-  for cmd in curl wget dig ip addr; do
+  for cmd in curl wget dig ip; do
     if ! command -v $cmd &> /dev/null; then
       print_error "$cmd failed to install. Please check your repositories and internet connection."
       exit 1

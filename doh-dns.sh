@@ -1,27 +1,6 @@
 #!/bin/bash
 set -e
 
-# ====== Non-interactive shell check ======
-if ! [ -t 0 ]; then
-  echo "ERROR: This script must be run in an interactive shell." >&2
-  exit 1
-fi
-
-# ====== Check for apt ======
-if ! command -v apt &> /dev/null; then
-  echo "ERROR: This script only supports Debian/Ubuntu systems with apt package manager." >&2
-  exit 1
-fi
-
-# ====== Default blocked sites list ======
-DEFAULT_SITES=("youtube.com" "instagram.com" "facebook.com" "telegram.org" "twitter.com" "t.me" "discord.com" "spotify.com")
-
-# ====== Paths and service names ======
-SITES_FILE="/etc/bind/zones/sites.list"
-ZONES_FILE="/etc/bind/zones/blocklist.zones"
-SERVICE_BIND=""
-SERVICE_DOH="doh-server"
-
 # ====== Output colors ======
 if [ -t 1 ]; then
   RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'; MAGENTA='\033[0;35m'; CYAN='\033[0;36m'
@@ -29,19 +8,22 @@ else
   RED=''; GREEN=''; YELLOW=''; NC=''; MAGENTA=''; CYAN='';
 fi
 
-# ====== Trap for cleaning temp files ======
-TMPFILES=()
-cleanup() {
-  for f in "${TMPFILES[@]}"; do
-    [ -e "$f" ] && rm -f "$f"
-  done
-}
-trap cleanup EXIT
-
 # ====== Utility Functions ======
 print_error() { echo -e "${RED}ERROR: $1${NC}"; }
 print_info()  { echo -e "${GREEN}INFO: $1${NC}"; }
 print_warn()  { echo -e "${YELLOW}WARNING: $1${NC}"; }
+
+# ====== Non-interactive shell check ======
+if ! [ -t 0 ]; then
+  print_error "This script must be run in an interactive shell."
+  exit 1
+fi
+
+# ====== Check for apt ======
+if ! command -v apt &> /dev/null; then
+  print_error "This script only supports Debian/Ubuntu systems with apt package manager."
+  exit 1
+fi
 
 # ====== Disk Space Check ======
 check_disk_space() {
@@ -175,7 +157,6 @@ reset_everything() {
   sudo rm -f /etc/nginx/sites-available/doh_dns_* /etc/nginx/sites-enabled/doh_dns_*
   sudo rm -rf /etc/bind/zones
   sudo rm -f /usr/local/bin/doh-server /etc/systemd/system/doh-server.service
-  # Only remove SSL certs for the configured domain(s)
   if [ -f "$SITES_FILE" ]; then
     mapfile -t domains < "$SITES_FILE"
     for d in "${domains[@]}"; do
@@ -381,13 +362,11 @@ setup_nginx_ssl() {
   local NGINX_LINK="/etc/nginx/sites-enabled/doh_dns_$DOMAIN"
   local PORT=443
 
-  # Check for domain/port conflict
   local conflict_file
   conflict_file=$(nginx_domain_conflict "$DOMAIN" "$PORT") && {
     print_error "A virtual host for $DOMAIN on port $PORT already exists in nginx: $conflict_file"
     exit 1
   }
-  # Check for port conflict
   conflict_file=$(nginx_port_conflict "$PORT") && {
     print_warn "Port $PORT is already used by another nginx site: $conflict_file"
     read -p "Do you want to use an alternative port (e.g. 8443)? [y/N]: " use_alt
@@ -630,6 +609,13 @@ test_dns_forwarding() {
 }
 
 # ====== Main Install/Uninstall Logic ======
+check_root() {
+  if [ "$(id -u)" -ne 0 ]; then
+    print_error "This script must be run as root"
+    exit 1
+  fi
+}
+
 install_service() {
   check_root
   check_disk_space
@@ -683,6 +669,23 @@ check_if_installed() {
     return 1
   fi
 }
+
+# ====== Trap for cleaning temp files ======
+TMPFILES=()
+cleanup() {
+  for f in "${TMPFILES[@]}"; do
+    [ -e "$f" ] && rm -f "$f"
+  done
+}
+trap cleanup EXIT
+
+# ====== Default blocked sites list ======
+DEFAULT_SITES=("youtube.com" "instagram.com" "facebook.com" "telegram.org" "twitter.com" "t.me" "discord.com" "spotify.com")
+
+SITES_FILE="/etc/bind/zones/sites.list"
+ZONES_FILE="/etc/bind/zones/blocklist.zones"
+SERVICE_BIND=""
+SERVICE_DOH="doh-server"
 
 # ====== Main Menu ======
 main_menu() {

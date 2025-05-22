@@ -8,6 +8,7 @@ NAMED_OPTIONS="/etc/bind/named.conf.options"
 NAMED_CONF="/etc/bind/named.conf"
 NAMED_CONF_LOCAL="/etc/bind/named.conf.local"
 ZONES_DIR="/etc/bind/zones"
+DOH_CONF="/etc/dns-over-https/doh-server.conf"
 
 # ====== Output Colors ======
 if [ -t 1 ]; then
@@ -26,7 +27,6 @@ check_and_install_go() {
   REQUIRED_MINOR=24
   REQUIRED_PATCH=0
 
-  # Check if Go is installed
   if ! command -v go >/dev/null 2>&1; then
     print_warn "Go is not installed. Installing Go 1.24.0 ..."
     install_go
@@ -585,16 +585,18 @@ install_doh_server() {
   cd /
   print_info "doh-server installed."
 }
+
 uninstall_doh_server() {
   print_info "Removing DoH server..."
   systemctl stop doh-server || true
-  rm -rf /usr/local/bin/doh-server /etc/systemd/system/doh-server.service
+  rm -f /usr/local/bin/doh-server /etc/systemd/system/doh-server.service
   print_info "DoH server removed."
 }
+
 setup_doh_service() {
   local DOMAIN="$1"
   sudo mkdir -p /etc/dns-over-https
-  sudo tee /etc/dns-over-https/doh-server.conf > /dev/null <<EOF
+  sudo tee "$DOH_CONF" > /dev/null <<EOF
 listen = [ ":8053" ]
 cert = "/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
 key = "/etc/letsencrypt/live/$DOMAIN/privkey.pem"
@@ -611,7 +613,7 @@ Description=DNS over HTTPS server (m13253)
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/doh-server -conf /etc/dns-over-https/doh-server.conf
+ExecStart=/usr/local/bin/doh-server -conf $DOH_CONF
 Restart=always
 
 [Install]

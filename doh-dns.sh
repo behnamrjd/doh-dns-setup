@@ -486,33 +486,35 @@ setup_nginx_ssl() {
     [[ "$cont" =~ ^[Yy]$ ]] || exit 1
   fi
 
-  # ====== Remove conflicting server blocks on port 443 ======
-  print_info "Checking for conflicting nginx server blocks on port 443..."
-  # Remove default site if exists
-  if [ -e /etc/nginx/sites-enabled/default ]; then
-    sudo rm -f /etc/nginx/sites-enabled/default
-    print_warn "Default nginx site on 443 disabled."
-  fi
-  # Remove any other enabled site with same server_name or listen 443
+  # ====== Remove ALL conflicting server blocks on port 443 ======
+  print_info "Removing all conflicting nginx server blocks on port 443..."
+  sudo rm -f /etc/nginx/sites-enabled/default
   for f in /etc/nginx/sites-enabled/*; do
     [ -f "$f" ] || continue
-    if grep -q "listen 443" "$f" && grep -q "server_name" "$f"; then
-      if grep -q "server_name $DOMAIN" "$f" || grep -q "server_name _" "$f" || grep -q "default_server" "$f"; then
-        sudo rm -f "$f"
-        print_warn "Conflicting nginx site $f disabled."
-      fi
+    if grep -q "listen 443" "$f"; then
+      sudo rm -f "$f"
     fi
   done
-  # Remove any 443 server block in conf.d
-  for f in /etc/nginx/conf.d/*.conf; do
+  for f in /etc/nginx/conf.d/*.conf /etc/nginx/conf.d/*.conf.bak; do
     [ -f "$f" ] || continue
-    if grep -q "listen 443" "$f" && (grep -q "server_name $DOMAIN" "$f" || grep -q "server_name _" "$f" || grep -q "default_server" "$f"); then
-      sudo mv "$f" "$f.bak"
-      print_warn "Conflicting nginx conf $f moved to $f.bak"
+    if grep -q "listen 443" "$f"; then
+      sudo rm -f "$f"
     fi
   done
 
-  # Write DoH nginx server block (overwrite temp HTTP block)
+  # ====== Check and fix nginx.conf include order ======
+  if grep -q "include /etc/nginx/conf.d/\*.conf;" /etc/nginx/nginx.conf; then
+    print_warn "Disabling include /etc/nginx/conf.d/*.conf in nginx.conf to prevent conflict."
+    sudo sed -i 's|include /etc/nginx/conf.d/\*.conf;|# include /etc/nginx/conf.d/*.conf;|g' /etc/nginx/nginx.conf
+  fi
+
+  # ====== Check SSL certificate files ======
+  if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ] || [ ! -f "/etc/letsencrypt/live/$DOMAIN/privkey.pem" ]; then
+    print_error "SSL certificate or key missing for $DOMAIN"
+    exit 1
+  fi
+
+  # ====== Write DoH nginx server block ======
   sudo tee "$NGINX_CONF" > /dev/null << EOF
 server {
     listen 443 ssl http2;
@@ -534,6 +536,12 @@ server {
 EOF
   sudo ln -sf "$NGINX_CONF" "$NGINX_LINK"
 
+  # ====== Check doh-server is running and listening ======
+  if ! ss -tuln | grep -q ":8053 "; then
+    print_error "doh-server is not listening on 127.0.0.1:8053. Please check doh-server status."
+    exit 1
+  fi
+
   if ! nginx -t 2>&1 | tee /tmp/nginx_test.log | grep -q "successful"; then
     print_error "nginx configuration test failed. See /tmp/nginx_test.log"
     rm -f "$NGINX_CONF" "$NGINX_LINK"
@@ -541,6 +549,15 @@ EOF
   fi
   sudo systemctl reload nginx || { print_error "Failed to reload Nginx."; exit 1; }
   print_info "Nginx configured for $DOMAIN on port $PORT"
+
+  # ====== Final test with curl ======
+  sleep 2
+  CURL_OUT=$(curl -sk "https://$DOMAIN/dns-query?dns=AAABAAABAAAAAAAAB2dvb2dsZQNjb20AAAEAAQ" -H 'accept: application/dns-message' || true)
+  if [[ "$CURL_OUT" == *"Client sent an HTTP request to an HTTPS server."* ]] || [[ "$CURL_OUT" == *"400"* ]]; then
+    print_error "Nginx is still returning 400. Please check for any remaining conflicting server blocks or misconfigurations."
+    print_error "Try: sudo nginx -T | grep -A20 'server {' and check that only one server block with listen 443 and server_name $DOMAIN exists."
+    exit 1
+  fi
 }
 
 uninstall_nginx() {

@@ -475,32 +475,53 @@ setup_nginx_ssl() {
 
   # ====== Remove ALL conflicting server blocks on port 443 ======
   print_info "Removing all conflicting nginx server blocks on port 443..."
-sudo rm -f /etc/nginx/sites-enabled/default
-for f in /etc/nginx/sites-enabled/*; do
-  [ -f "$f" ] || continue
-  if grep -q "listen 443" "$f"; then
-    sudo rm -f "$f"
+  sudo rm -f /etc/nginx/sites-enabled/default
+  for f in /etc/nginx/sites-enabled/*; do
+    [ -f "$f" ] || continue
+    if grep -q "listen 443" "$f"; then
+      sudo rm -f "$f"
+    fi
+  done
+  for f in /etc/nginx/conf.d/*.conf /etc/nginx/conf.d/*.conf.bak; do
+    [ -f "$f" ] || continue
+    if grep -q "listen 443" "$f"; then
+      sudo rm -f "$f"
+    fi
+  done
+
+  # ====== غیرفعال کردن include conf.d در nginx.conf (برای جلوگیری از تداخل) ======
+  if grep -q "include /etc/nginx/conf.d/\*.conf;" /etc/nginx/nginx.conf; then
+    sudo sed -i 's|include /etc/nginx/conf.d/\*.conf;|# include /etc/nginx/conf.d/*.conf;|g' /etc/nginx/nginx.conf
   fi
-done
-for f in /etc/nginx/conf.d/*.conf /etc/nginx/conf.d/*.conf.bak; do
-  [ -f "$f" ] || continue
-  if grep -q "listen 443" "$f"; then
-    sudo rm -f "$f"
-  fi
-done
 
-if grep -q "include /etc/nginx/conf.d/\*.conf;" /etc/nginx/nginx.conf; then
-  sudo sed -i 's|include /etc/nginx/conf.d/\*.conf;|# include /etc/nginx/conf.d/*.conf;|g' /etc/nginx/nginx.conf
-fi
+  # ====== ساخت سرور بلاک موقت HTTP برای certbot ======
+  sudo tee "$NGINX_CONF" > /dev/null << EOF
+server {
+    listen 80;
+    server_name $DOMAIN;
+    location / {
+        return 404;
+    }
+}
+EOF
+  sudo ln -sf "$NGINX_CONF" "$NGINX_LINK"
+  sudo nginx -t
+  sudo systemctl reload nginx
 
+  # ====== اجرای certbot ======
+  print_info "Obtaining SSL certificate on port 80 with certbot nginx plugin."
+  certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" > /tmp/certbot.log 2>&1 || {
+    print_error "Failed to obtain SSL certificate using nginx plugin. See /tmp/certbot.log"
+    exit 1
+  }
 
-  # ====== Check SSL certificate files ======
+  # ====== حالا چک وجود فایل‌های گواهی ======
   if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ] || [ ! -f "/etc/letsencrypt/live/$DOMAIN/privkey.pem" ]; then
-    print_error "SSL certificate or key missing for $DOMAIN"
+    print_error "SSL certificate or key missing for $DOMAIN after certbot. Something went wrong!"
     exit 1
   fi
 
-  # ====== Write DoH nginx server block ======
+  # ====== نوشتن سرور بلاک نهایی SSL ======
   sudo tee "$NGINX_CONF" > /dev/null << EOF
 server {
     listen 443 ssl http2;
@@ -521,30 +542,11 @@ server {
 }
 EOF
   sudo ln -sf "$NGINX_CONF" "$NGINX_LINK"
-
-  # ====== Check doh-server is running and listening ======
-  if ! ss -tuln | grep -q ":8053 "; then
-    print_error "doh-server is not listening on 127.0.0.1:8053. Please check doh-server status."
-    exit 1
-  fi
-
-  if ! nginx -t 2>&1 | tee /tmp/nginx_test.log | grep -q "successful"; then
-    print_error "nginx configuration test failed. See /tmp/nginx_test.log"
-    rm -f "$NGINX_CONF" "$NGINX_LINK"
-    exit 1
-  fi
-  sudo systemctl reload nginx || { print_error "Failed to reload Nginx."; exit 1; }
-  print_info "Nginx configured for $DOMAIN on port $PORT"
-
-  # ====== Final test with curl ======
-sleep 2
-CURL_OUT=$(curl -sk "https://$DOMAIN/dns-query?dns=AAABAAABAAAAAAAAB2dvb2dsZQNjb20AAAEAAQ" -H 'accept: application/dns-message' || true)
-if [[ "$CURL_OUT" == *"Client sent an HTTP request to an HTTPS server."* ]] || [[ "$CURL_OUT" == *"400"* ]]; then
-  print_error "Nginx is still returning 400. Check for any remaining conflicting server blocks or misconfigurations."
-  print_error "Try: sudo nginx -T | grep -A20 'server {' and ensure only one server block with listen 443 and server_name $DOMAIN exists."
-  exit 1
-fi
+  sudo nginx -t
+  sudo systemctl reload nginx
+  print_info "Nginx SSL config for $DOMAIN is ready and active."
 }
+
 
 uninstall_nginx() {
   print_info "Removing Nginx and DoH configs..."

@@ -1,8 +1,8 @@
 #!/bin/bash
 
-DOMAIN="dns.dnsly.fun"      # دامنه خودت را اینجا قرار بده
-DNS_PORT=53                 # پورت BIND (در نسخه جدید همیشه 53 است)
-DOH_PORT=443                # پورت nginx (در نسخه جدید همیشه 443 است)
+DOMAIN="dns.dnsly.fun"      # Set your domain here
+DNS_PORT=53                 # BIND port (always 53 in the new setup)
+DOH_PORT=443                # nginx port (always 443 in the new setup)
 DOH_PATH="/dns-query"
 
 RED='\033[0;31m'
@@ -54,7 +54,10 @@ fi
 
 echo -e "${YELLOW}Testing DoH server with curl...${NC}"
 DNS_QUERY="AAABAAABAAAAAAAAB2dvb2dsZQNjb20AAAEAAQ"
-if curl -sk "https://$DOMAIN:$DOH_PORT$DOH_PATH?dns=$DNS_QUERY" -H 'accept: application/dns-message' | grep -q .; then
+CURL_OUT=$(curl -sk "https://$DOMAIN:$DOH_PORT$DOH_PATH?dns=$DNS_QUERY" -H 'accept: application/dns-message')
+if [[ "$CURL_OUT" =~ "Client sent an HTTP request to an HTTPS server." ]] || [[ "$CURL_OUT" =~ "400" ]]; then
+  fail "DoH server returned HTTP 400 or protocol error (check nginx & doh-server config and conflicts!)"
+elif [[ "$CURL_OUT" =~ . ]]; then
   ok "DoH server responds to DNS-over-HTTPS queries"
 else
   fail "DoH server does NOT respond to DNS-over-HTTPS queries"

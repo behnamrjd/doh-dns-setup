@@ -191,17 +191,9 @@ reset_everything() {
   prompt_backup
   print_info "Resetting: Only files created by this script will be removed."
 
-  # Stop and disable all related services
   sudo systemctl stop nginx doh-server bind9 named 2>/dev/null || true
   sudo systemctl disable bind9 named 2>/dev/null || true
 
-  # Remove listen-on port lines from BIND config
-  if [ -f "$NAMED_OPTIONS" ]; then
-    sudo sed -i '/listen-on port/d' "$NAMED_OPTIONS"
-    sudo sed -i '/listen-on-v6 port/d' "$NAMED_OPTIONS"
-  fi
-
-  # Remove all DoH Nginx configs and any 443 server block for our domain or default
   sudo rm -f /etc/nginx/sites-available/doh_dns_* /etc/nginx/sites-enabled/doh_dns_*
   sudo rm -f /etc/nginx/sites-enabled/default
   for f in /etc/nginx/sites-enabled/*; do
@@ -217,12 +209,10 @@ reset_everything() {
     fi
   done
 
-  # Remove zones and DoH server
   sudo rm -rf "$ZONES_DIR"
   sudo rm -f /usr/local/bin/doh-server /etc/systemd/system/doh-server.service
   sudo rm -rf /etc/dns-over-https
 
-  # Remove Let's Encrypt certs for all domains in sites.list
   if [ -f "$SITES_FILE" ]; then
     mapfile -t domains < "$SITES_FILE"
     for d in "${domains[@]}"; do
@@ -232,17 +222,14 @@ reset_everything() {
   sudo rm -rf /var/log/letsencrypt
   sudo rm -f "$SITES_FILE"
 
-  # Clean named.conf.local from includes/zones
   if [ -f "$NAMED_CONF_LOCAL" ]; then
     sudo sed -i '/blocklist\.zones/d' "$NAMED_CONF_LOCAL"
     sudo sed -i '/zone.*{/,/};/d' "$NAMED_CONF_LOCAL"
   fi
 
-  # Ensure empty zone file exists to avoid BIND errors
   sudo mkdir -p "$ZONES_DIR"
   sudo touch "$ZONES_FILE"
 
-  # Reload systemd and restart networking/nginx
   sudo systemctl daemon-reload
   sudo systemctl restart networking 2>/dev/null || true
   sudo systemctl start nginx 2>/dev/null || true
@@ -488,25 +475,24 @@ setup_nginx_ssl() {
 
   # ====== Remove ALL conflicting server blocks on port 443 ======
   print_info "Removing all conflicting nginx server blocks on port 443..."
-  sudo rm -f /etc/nginx/sites-enabled/default
-  for f in /etc/nginx/sites-enabled/*; do
-    [ -f "$f" ] || continue
-    if grep -q "listen 443" "$f"; then
-      sudo rm -f "$f"
-    fi
-  done
-  for f in /etc/nginx/conf.d/*.conf /etc/nginx/conf.d/*.conf.bak; do
-    [ -f "$f" ] || continue
-    if grep -q "listen 443" "$f"; then
-      sudo rm -f "$f"
-    fi
-  done
-
-  # ====== Check and fix nginx.conf include order ======
-  if grep -q "include /etc/nginx/conf.d/\*.conf;" /etc/nginx/nginx.conf; then
-    print_warn "Disabling include /etc/nginx/conf.d/*.conf in nginx.conf to prevent conflict."
-    sudo sed -i 's|include /etc/nginx/conf.d/\*.conf;|# include /etc/nginx/conf.d/*.conf;|g' /etc/nginx/nginx.conf
+sudo rm -f /etc/nginx/sites-enabled/default
+for f in /etc/nginx/sites-enabled/*; do
+  [ -f "$f" ] || continue
+  if grep -q "listen 443" "$f"; then
+    sudo rm -f "$f"
   fi
+done
+for f in /etc/nginx/conf.d/*.conf /etc/nginx/conf.d/*.conf.bak; do
+  [ -f "$f" ] || continue
+  if grep -q "listen 443" "$f"; then
+    sudo rm -f "$f"
+  fi
+done
+
+if grep -q "include /etc/nginx/conf.d/\*.conf;" /etc/nginx/nginx.conf; then
+  sudo sed -i 's|include /etc/nginx/conf.d/\*.conf;|# include /etc/nginx/conf.d/*.conf;|g' /etc/nginx/nginx.conf
+fi
+
 
   # ====== Check SSL certificate files ======
   if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ] || [ ! -f "/etc/letsencrypt/live/$DOMAIN/privkey.pem" ]; then
@@ -551,13 +537,13 @@ EOF
   print_info "Nginx configured for $DOMAIN on port $PORT"
 
   # ====== Final test with curl ======
-  sleep 2
-  CURL_OUT=$(curl -sk "https://$DOMAIN/dns-query?dns=AAABAAABAAAAAAAAB2dvb2dsZQNjb20AAAEAAQ" -H 'accept: application/dns-message' || true)
-  if [[ "$CURL_OUT" == *"Client sent an HTTP request to an HTTPS server."* ]] || [[ "$CURL_OUT" == *"400"* ]]; then
-    print_error "Nginx is still returning 400. Please check for any remaining conflicting server blocks or misconfigurations."
-    print_error "Try: sudo nginx -T | grep -A20 'server {' and check that only one server block with listen 443 and server_name $DOMAIN exists."
-    exit 1
-  fi
+sleep 2
+CURL_OUT=$(curl -sk "https://$DOMAIN/dns-query?dns=AAABAAABAAAAAAAAB2dvb2dsZQNjb20AAAEAAQ" -H 'accept: application/dns-message' || true)
+if [[ "$CURL_OUT" == *"Client sent an HTTP request to an HTTPS server."* ]] || [[ "$CURL_OUT" == *"400"* ]]; then
+  print_error "Nginx is still returning 400. Check for any remaining conflicting server blocks or misconfigurations."
+  print_error "Try: sudo nginx -T | grep -A20 'server {' and ensure only one server block with listen 443 and server_name $DOMAIN exists."
+  exit 1
+fi
 }
 
 uninstall_nginx() {
@@ -610,8 +596,8 @@ uninstall_doh_server() {
 setup_doh_service() {
   local DOMAIN="$1"
   sudo mkdir -p /etc/dns-over-https
-  sudo tee "$DOH_CONF" > /dev/null <<EOF
-listen = [ ":8053" ]
+  sudo tee /etc/dns-over-https/doh-server.conf > /dev/null <<EOF
+listen = [ "127.0.0.1:8053" ]
 cert = "/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
 key = "/etc/letsencrypt/live/$DOMAIN/privkey.pem"
 path = "/dns-query"
@@ -627,16 +613,22 @@ Description=DNS over HTTPS server (m13253)
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/doh-server -conf $DOH_CONF
+ExecStart=/usr/local/bin/doh-server -conf /etc/dns-over-https/doh-server.conf
 Restart=always
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-  systemctl daemon-reload
-  systemctl enable --now doh-server || { print_error "Failed to start doh-server."; exit 1; }
-  check_service_running doh-server || exit 1
+  sudo systemctl daemon-reload
+  sudo systemctl restart doh-server
+  sleep 2
+
+  if ! ss -tuln | grep -q "127.0.0.1:8053"; then
+    print_error "doh-server is NOT listening on 127.0.0.1:8053. Check doh-server logs with: journalctl -u doh-server -n 30"
+    exit 1
+  fi
+  print_info "doh-server is running and listening on 127.0.0.1:8053"
 }
 
 setup_bind_forwarders() {

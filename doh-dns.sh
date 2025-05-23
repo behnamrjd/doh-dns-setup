@@ -473,7 +473,7 @@ setup_nginx_ssl() {
     [[ "$cont" =~ ^[Yy]$ ]] || exit 1
   fi
 
-  # ====== Remove ALL conflicting server blocks on port 443 ======
+  # ====== Remove ALL conflicting nginx server blocks on port 443 ======
   print_info "Removing all conflicting nginx server blocks on port 443..."
   sudo rm -f /etc/nginx/sites-enabled/default
   for f in /etc/nginx/sites-enabled/*; do
@@ -489,12 +489,12 @@ setup_nginx_ssl() {
     fi
   done
 
-  # ====== غیرفعال کردن include conf.d در nginx.conf (برای جلوگیری از تداخل) ======
+  # ====== Disable include conf.d in nginx.conf (to prevent conflicts) ======
   if grep -q "include /etc/nginx/conf.d/\*.conf;" /etc/nginx/nginx.conf; then
     sudo sed -i 's|include /etc/nginx/conf.d/\*.conf;|# include /etc/nginx/conf.d/*.conf;|g' /etc/nginx/nginx.conf
   fi
 
-  # ====== ساخت سرور بلاک موقت HTTP برای certbot ======
+  # ====== Create temporary HTTP server block for certbot ======
   sudo tee "$NGINX_CONF" > /dev/null << EOF
 server {
     listen 80;
@@ -508,20 +508,20 @@ EOF
   sudo nginx -t
   sudo systemctl reload nginx
 
-  # ====== اجرای certbot ======
+  # ====== Run certbot to obtain SSL certificate ======
   print_info "Obtaining SSL certificate on port 80 with certbot nginx plugin."
   certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" > /tmp/certbot.log 2>&1 || {
     print_error "Failed to obtain SSL certificate using nginx plugin. See /tmp/certbot.log"
     exit 1
   }
 
-  # ====== حالا چک وجود فایل‌های گواهی ======
+  # ====== Now check for existence of SSL certificate files ======
   if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ] || [ ! -f "/etc/letsencrypt/live/$DOMAIN/privkey.pem" ]; then
     print_error "SSL certificate or key missing for $DOMAIN after certbot. Something went wrong!"
     exit 1
   fi
 
-  # ====== نوشتن سرور بلاک نهایی SSL ======
+  # ====== Write final SSL server block ======
   sudo tee "$NGINX_CONF" > /dev/null << EOF
 server {
     listen 443 ssl http2;

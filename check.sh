@@ -1,8 +1,8 @@
 #!/bin/bash
 
-DOMAIN="dns.dnsly.fun"
-DNS_PORT=1053
-DOH_PORT=8443
+DOMAIN="dns.dnsly.fun"      # دامنه خودت را اینجا قرار بده
+DNS_PORT=53                 # پورت BIND (در نسخه جدید همیشه 53 است)
+DOH_PORT=443                # پورت nginx (در نسخه جدید همیشه 443 است)
 DOH_PATH="/dns-query"
 
 RED='\033[0;31m'

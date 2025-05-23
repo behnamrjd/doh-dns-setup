@@ -10,7 +10,6 @@ NAMED_CONF_LOCAL="/etc/bind/named.conf.local"
 ZONES_DIR="/etc/bind/zones"
 DOH_CONF="/etc/dns-over-https/doh-server.conf"
 
-# ====== Output Colors ======
 if [ -t 1 ]; then
   RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'; MAGENTA='\033[0;35m'; CYAN='\033[0;36m'
 else
@@ -187,6 +186,7 @@ backup_configs() {
   sudo cp "$NAMED_CONF_LOCAL" "$NAMED_CONF_LOCAL.bak" 2>/dev/null || true
   sudo cp "$NAMED_OPTIONS" "$NAMED_OPTIONS.bak" 2>/dev/null || true
 }
+
 reset_everything() {
   prompt_backup
   print_info "Resetting: Only files created by this script will be removed."
@@ -436,7 +436,23 @@ obtain_ssl_certificate() {
     fi
   fi
 
-  print_info "Obtaining SSL certificate on port 443 with certbot nginx plugin."
+  # Step 1: Create temporary HTTP server block for certbot
+  local TEMP_CONF="/etc/nginx/sites-available/doh_dns_$DOMAIN"
+  sudo tee "$TEMP_CONF" > /dev/null << EOF
+server {
+    listen 80;
+    server_name $DOMAIN;
+    location / {
+        return 404;
+    }
+}
+EOF
+  sudo ln -sf "$TEMP_CONF" /etc/nginx/sites-enabled/doh_dns_$DOMAIN
+  sudo nginx -t
+  sudo systemctl reload nginx
+
+  # Step 2: Obtain certificate
+  print_info "Obtaining SSL certificate on port 80 with certbot nginx plugin."
   certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" > /tmp/certbot.log 2>&1 || {
     print_error "Failed to obtain SSL certificate using nginx plugin. See /tmp/certbot.log"
     exit 1
@@ -496,9 +512,7 @@ setup_nginx_ssl() {
     fi
   done
 
-  obtain_ssl_certificate "$DOMAIN" "$EMAIL"
-
-  # Write DoH nginx server block
+  # Write DoH nginx server block (overwrite temp HTTP block)
   sudo tee "$NGINX_CONF" > /dev/null << EOF
 server {
     listen 443 ssl http2;

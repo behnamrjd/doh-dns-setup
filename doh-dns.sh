@@ -190,16 +190,39 @@ backup_configs() {
 reset_everything() {
   prompt_backup
   print_info "Resetting: Only files created by this script will be removed."
+
+  # Stop and disable all related services
   sudo systemctl stop nginx doh-server bind9 named 2>/dev/null || true
   sudo systemctl disable bind9 named 2>/dev/null || true
+
+  # Remove listen-on port lines from BIND config
   if [ -f "$NAMED_OPTIONS" ]; then
     sudo sed -i '/listen-on port/d' "$NAMED_OPTIONS"
     sudo sed -i '/listen-on-v6 port/d' "$NAMED_OPTIONS"
   fi
+
+  # Remove all DoH Nginx configs and any 443 server block for our domain or default
   sudo rm -f /etc/nginx/sites-available/doh_dns_* /etc/nginx/sites-enabled/doh_dns_*
+  sudo rm -f /etc/nginx/sites-enabled/default
+  for f in /etc/nginx/sites-enabled/*; do
+    [ -f "$f" ] || continue
+    if grep -q "listen 443" "$f"; then
+      sudo rm -f "$f"
+    fi
+  done
+  for f in /etc/nginx/conf.d/*.conf /etc/nginx/conf.d/*.conf.bak; do
+    [ -f "$f" ] || continue
+    if grep -q "listen 443" "$f"; then
+      sudo rm -f "$f"
+    fi
+  done
+
+  # Remove zones and DoH server
   sudo rm -rf "$ZONES_DIR"
   sudo rm -f /usr/local/bin/doh-server /etc/systemd/system/doh-server.service
   sudo rm -rf /etc/dns-over-https
+
+  # Remove Let's Encrypt certs for all domains in sites.list
   if [ -f "$SITES_FILE" ]; then
     mapfile -t domains < "$SITES_FILE"
     for d in "${domains[@]}"; do
@@ -208,16 +231,23 @@ reset_everything() {
   fi
   sudo rm -rf /var/log/letsencrypt
   sudo rm -f "$SITES_FILE"
+
+  # Clean named.conf.local from includes/zones
   if [ -f "$NAMED_CONF_LOCAL" ]; then
     sudo sed -i '/blocklist\.zones/d' "$NAMED_CONF_LOCAL"
     sudo sed -i '/zone.*{/,/};/d' "$NAMED_CONF_LOCAL"
   fi
+
+  # Ensure empty zone file exists to avoid BIND errors
   sudo mkdir -p "$ZONES_DIR"
   sudo touch "$ZONES_FILE"
+
+  # Reload systemd and restart networking/nginx
   sudo systemctl daemon-reload
   sudo systemctl restart networking 2>/dev/null || true
   sudo systemctl start nginx 2>/dev/null || true
-  print_info "Reset complete. Main system files are not deleted and all previous DNS ports are now free."
+
+  print_info "Full reset complete. All configs, services, certs, and server blocks for DoH/BIND/nginx are removed."
 }
 
 # ====== Website List Management ======

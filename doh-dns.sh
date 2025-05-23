@@ -440,12 +440,38 @@ setup_nginx_ssl() {
     [[ "$cont" =~ ^[Yy]$ ]] || exit 1
   fi
 
+  # ====== Remove conflicting server blocks on port 443 ======
+  print_info "Checking for conflicting nginx server blocks on port 443..."
+  # Remove default site if exists
+  if [ -e /etc/nginx/sites-enabled/default ]; then
+    sudo rm -f /etc/nginx/sites-enabled/default
+    print_warn "Default nginx site on 443 disabled."
+  fi
+  # Remove any other enabled site with same server_name or listen 443
+  for f in /etc/nginx/sites-enabled/*; do
+    [ -f "$f" ] || continue
+    if grep -q "listen 443" "$f" && grep -q "server_name" "$f"; then
+      if grep -q "server_name $DOMAIN" "$f" || grep -q "server_name _" "$f" || grep -q "default_server" "$f"; then
+        sudo rm -f "$f"
+        print_warn "Conflicting nginx site $f disabled."
+      fi
+    fi
+  done
+  # Remove any 443 server block in conf.d
+  for f in /etc/nginx/conf.d/*.conf; do
+    [ -f "$f" ] || continue
+    if grep -q "listen 443" "$f" && (grep -q "server_name $DOMAIN" "$f" || grep -q "server_name _" "$f" || grep -q "default_server" "$f"); then
+      sudo mv "$f" "$f.bak"
+      print_warn "Conflicting nginx conf $f moved to $f.bak"
+    fi
+  done
+
   obtain_ssl_certificate "$DOMAIN" "$EMAIL"
 
-  if [ ! -f "$NGINX_CONF" ]; then
-    cat > "$NGINX_CONF" << EOF
+  # Write DoH nginx server block
+  sudo tee "$NGINX_CONF" > /dev/null << EOF
 server {
-    listen $PORT ssl http2;
+    listen 443 ssl http2;
     server_name $DOMAIN;
     ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
@@ -453,19 +479,23 @@ server {
         proxy_pass http://127.0.0.1:8053/dns-query;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_pass_request_headers on;
         autoindex off;
     }
 }
 EOF
-    ln -sf "$NGINX_CONF" "$NGINX_LINK"
-  fi
+  sudo ln -sf "$NGINX_CONF" "$NGINX_LINK"
 
   if ! nginx -t 2>&1 | tee /tmp/nginx_test.log | grep -q "successful"; then
     print_error "nginx configuration test failed. See /tmp/nginx_test.log"
     rm -f "$NGINX_CONF" "$NGINX_LINK"
     exit 1
   fi
-  systemctl reload nginx || { print_error "Failed to reload Nginx."; exit 1; }
+  sudo systemctl reload nginx || { print_error "Failed to reload Nginx."; exit 1; }
   print_info "Nginx configured for $DOMAIN on port $PORT"
 }
 

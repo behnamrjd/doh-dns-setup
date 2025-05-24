@@ -477,7 +477,34 @@ setup_nginx_ssl() {
     sudo sed -i 's|include /etc/nginx/conf.d/\*.conf;|# include /etc/nginx/conf.d/*.conf;|g' /etc/nginx/nginx.conf
   fi
 
-  # Write DoH nginx server block (overwrite temp HTTP block)
+  # Create temporary HTTP server block for certbot
+  sudo tee "$NGINX_CONF" > /dev/null << EOF
+server {
+    listen 80;
+    server_name $DOMAIN;
+    location / {
+        return 404;
+    }
+}
+EOF
+  sudo ln -sf "$NGINX_CONF" "$NGINX_LINK"
+  sudo nginx -t
+  sudo systemctl reload nginx
+
+  # Run certbot to obtain SSL certificate
+  print_info "Obtaining SSL certificate on port 80 with certbot nginx plugin."
+  certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" > /tmp/certbot.log 2>&1 || {
+    print_error "Failed to obtain SSL certificate using nginx plugin. See /tmp/certbot.log"
+    exit 1
+  }
+
+  # Now check for existence of SSL certificate files
+  if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ] || [ ! -f "/etc/letsencrypt/live/$DOMAIN/privkey.pem" ]; then
+    print_error "SSL certificate or key missing for $DOMAIN after certbot. Something went wrong!"
+    exit 1
+  fi
+
+  # Write final SSL server block
   sudo tee "$NGINX_CONF" > /dev/null << EOF
 server {
     listen 443 ssl http2;

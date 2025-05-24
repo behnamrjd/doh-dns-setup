@@ -1,7 +1,6 @@
 #!/bin/bash
 set -e
 
-# ====== Key File Paths ======
 SITES_FILE="/etc/bind/zones/sites.list"
 ZONES_FILE="/etc/bind/zones/blocklist.zones"
 NAMED_OPTIONS="/etc/bind/named.conf.options"

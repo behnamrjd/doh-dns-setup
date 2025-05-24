@@ -407,22 +407,6 @@ obtain_ssl_certificate() {
   local CERT_PATH="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
   local KEY_PATH="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
 
-  # Always use port 443, forcibly free it if needed
-  if ss -tuln | grep -q ":443 "; then
-    print_warn "Port 443 is in use. Attempting to stop possible conflicting services..."
-    for svc in nginx apache2 httpd lighttpd caddy haproxy; do
-      if systemctl is-active --quiet $svc; then
-        print_warn "Stopping $svc to free port 443."
-        systemctl stop $svc || true
-      fi
-    done
-    sleep 1
-    if ss -tuln | grep -q ":443 "; then
-      print_error "Port 443 is still in use after stopping common web servers. Please free port 443 and re-run the script."
-      exit 1
-    fi
-  fi
-
   # Step 1: Create temporary HTTP server block for certbot
   local TEMP_CONF="/etc/nginx/sites-available/doh_dns_$DOMAIN"
   sudo tee "$TEMP_CONF" > /dev/null << EOF
@@ -473,8 +457,7 @@ setup_nginx_ssl() {
     [[ "$cont" =~ ^[Yy]$ ]] || exit 1
   fi
 
-  # ====== Remove ALL conflicting nginx server blocks on port 443 ======
-  print_info "Removing all conflicting nginx server blocks on port 443..."
+  # Remove all conflicting nginx server blocks on port 443
   sudo rm -f /etc/nginx/sites-enabled/default
   for f in /etc/nginx/sites-enabled/*; do
     [ -f "$f" ] || continue
@@ -489,39 +472,12 @@ setup_nginx_ssl() {
     fi
   done
 
-  # ====== Disable include conf.d in nginx.conf (to prevent conflicts) ======
+  # Disable include conf.d in nginx.conf (to prevent conflicts)
   if grep -q "include /etc/nginx/conf.d/\*.conf;" /etc/nginx/nginx.conf; then
     sudo sed -i 's|include /etc/nginx/conf.d/\*.conf;|# include /etc/nginx/conf.d/*.conf;|g' /etc/nginx/nginx.conf
   fi
 
-  # ====== Create temporary HTTP server block for certbot ======
-  sudo tee "$NGINX_CONF" > /dev/null << EOF
-server {
-    listen 80;
-    server_name $DOMAIN;
-    location / {
-        return 404;
-    }
-}
-EOF
-  sudo ln -sf "$NGINX_CONF" "$NGINX_LINK"
-  sudo nginx -t
-  sudo systemctl reload nginx
-
-  # ====== Run certbot to obtain SSL certificate ======
-  print_info "Obtaining SSL certificate on port 80 with certbot nginx plugin."
-  certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" > /tmp/certbot.log 2>&1 || {
-    print_error "Failed to obtain SSL certificate using nginx plugin. See /tmp/certbot.log"
-    exit 1
-  }
-
-  # ====== Now check for existence of SSL certificate files ======
-  if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ] || [ ! -f "/etc/letsencrypt/live/$DOMAIN/privkey.pem" ]; then
-    print_error "SSL certificate or key missing for $DOMAIN after certbot. Something went wrong!"
-    exit 1
-  fi
-
-  # ====== Write final SSL server block ======
+  # Write DoH nginx server block (overwrite temp HTTP block)
   sudo tee "$NGINX_CONF" > /dev/null << EOF
 server {
     listen 443 ssl http2;
@@ -542,11 +498,24 @@ server {
 }
 EOF
   sudo ln -sf "$NGINX_CONF" "$NGINX_LINK"
-  sudo nginx -t
-  sudo systemctl reload nginx
-  print_info "Nginx SSL config for $DOMAIN is ready and active."
-}
 
+  if ! nginx -t 2>&1 | tee /tmp/nginx_test.log | grep -q "successful"; then
+    print_error "nginx configuration test failed. See /tmp/nginx_test.log"
+    rm -f "$NGINX_CONF" "$NGINX_LINK"
+    exit 1
+  fi
+  sudo systemctl reload nginx || { print_error "Failed to reload Nginx."; exit 1; }
+  print_info "Nginx configured for $DOMAIN on port $PORT"
+
+  # Final test with curl
+  sleep 2
+  CURL_OUT=$(curl -sk "https://$DOMAIN/dns-query?dns=AAABAAABAAAAAAAAB2dvb2dsZQNjb20AAAEAAQ" -H 'accept: application/dns-message' || true)
+  if [[ "$CURL_OUT" == *"Client sent an HTTP request to an HTTPS server."* ]] || [[ "$CURL_OUT" == *"400"* ]]; then
+    print_error "Nginx is still returning 400. Please check for any remaining conflicting server blocks or misconfigurations."
+    print_error "Try: sudo nginx -T | grep -A20 'server {' and check that only one server block with listen 443 and server_name $DOMAIN exists."
+    exit 1
+  fi
+}
 
 uninstall_nginx() {
   print_info "Removing Nginx and DoH configs..."
@@ -626,6 +595,7 @@ EOF
   sudo systemctl restart doh-server
   sleep 2
 
+  # Check that doh-server is actually listening on 127.0.0.1:8053
   if ! ss -tuln | grep -q "127.0.0.1:8053"; then
     print_error "doh-server is NOT listening on 127.0.0.1:8053. Check doh-server logs with: journalctl -u doh-server -n 30"
     exit 1

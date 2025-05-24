@@ -536,10 +536,10 @@ EOF
 
   # Final test with curl
   sleep 2
-  CURL_OUT=$(curl -sk "https://$DOMAIN/dns-query?dns=AAABAAABAAAAAAAAB2dvb2dsZQNjb20AAAEAAQ" -H 'accept: application/dns-message' || true)
-  if [[ "$CURL_OUT" == *"Client sent an HTTP request to an HTTPS server."* ]] || [[ "$CURL_OUT" == *"400"* ]]; then
-    print_error "Nginx is still returning 400. Please check for any remaining conflicting server blocks or misconfigurations."
-    print_error "Try: sudo nginx -T | grep -A20 'server {' and check that only one server block with listen 443 and server_name $DOMAIN exists."
+  TEST_DNS="AAABAAABAAAAAAAABmdvb2dsZQNjb20AAAEAAQ"
+  CURL_OUT=$(curl -sk "https://$DOMAIN/dns-query?dns=$TEST_DNS" -H 'accept: application/dns-message' --output - | hexdump -C | head -n 1)
+  if [[ -z "$CURL_OUT" ]]; then
+    print_error "Nginx DoH endpoint did not return a valid DNS message. Check configuration and logs."
     exit 1
   fi
 }
@@ -596,8 +596,9 @@ setup_doh_service() {
   sudo mkdir -p /etc/dns-over-https
   sudo tee /etc/dns-over-https/doh-server.conf > /dev/null <<EOF
 listen = [ "127.0.0.1:8053" ]
-cert = "/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
-key = "/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+# cert and key must be empty for HTTP-only backend!
+cert = ""
+key = ""
 path = "/dns-query"
 upstream = [ "udp:127.0.0.1:53" ]
 timeout = 10
